@@ -1,6 +1,6 @@
 //import bcModSDKRef from "bondage-club-mod-sdk";
-import { GetDotedPathType, PatchHook } from "bondage-club-mod-sdk";
-import bcModSDKRef from "bondage-club-mod-sdk";
+import type { GetDotedPathType, ModSDKModAPI, PatchHook } from "bondage-club-mod-sdk";
+// import bcModSDKRef from "bondage-club-mod-sdk";
 import { getModule } from "modules";
 import { CoreModule } from "Modules/core";
 import { ActivityEntryModel } from "Settings/Models/activities";
@@ -29,12 +29,22 @@ interface IPatchedFunctionData {
 
 const patchedFunctions: Map<string, IPatchedFunctionData> = new Map();
 
+const bcModSDK: ModSDKModAPI = {
+	callOriginal: (_funcName, _args, _ctx) => null as never,
+	getOriginalHash: (_funcName) => "",
+	hookFunction: (_funcName, _priority, _hook) => () => {},
+	patchFunction: (_funcName, _patches) => {},
+	removePatches: (_funcName) => {},
+	unload: () => {},
+};
+/*
 export const bcModSDK = bcModSDKRef.registerMod({
 	name: "LSCG",
 	fullName: "Little Sera's Club Games",
 	version: LSCG_VERSION.startsWith("v") ? LSCG_VERSION.slice(1) : LSCG_VERSION,
 	repository: "https://github.com/littlesera/LSCG"
 });
+*/
 
 export function patchFunction(target: string, patches: Record<string, string>): void {
 	bcModSDK.patchFunction(target, patches);

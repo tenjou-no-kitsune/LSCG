@@ -27,8 +27,37 @@ import { hasExtendedOnlineSettings, type ExtendedOnlineSettings } from "./types/
 
 import styles from "./main.scss?inline";
 import { MapModule } from "Modules/map";
+import * as Utils from "./utils";
+import * as Guards from "./types/guards";
+
+const ModuleClasses = {
+	CoreModule,
+	OpacityModule,
+	GUI,
+	OutfitCollectionModule,
+	StateModule,
+	HypnoModule,
+	CollarModule,
+	BoopsModule,
+	MiscModule,
+	LipstickModule,
+	InjectorModule,
+	ActivityModule,
+	ItemUseModule,
+	MagicModule,
+	RemoteUIModule,
+	CommandModule,
+	LeashingModule,
+	ChaoticItemModule,
+	SplatterModule,
+	CursedItemModule,
+	MapModule,
+}
 
 export { 
+	Utils,
+	ModuleClasses,
+	Guards,
 	DrugKeywords, 
 	NetgunKeywords, 
 	CraftableItemSpellNames, 
@@ -41,7 +70,7 @@ export {
 	sendLSCGBeep,
 	Outfits
 };
-
+/*
 function initWait() {
 	console.debug("LSCG: Init wait");
 	if (CurrentScreen == null || CurrentScreen === "Login") {
@@ -230,3 +259,4 @@ window.LSCG_Loaded = false;
 console.debug("LSCG: Parse start...");
 
 initWait();
+*/
