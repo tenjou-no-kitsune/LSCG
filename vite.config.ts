@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import tsconfigPaths from 'vite-tsconfig-paths';
 import cssInjectedByJsPlugin from 'vite-plugin-css-injected-by-js';
 import packageJson from "./package.json";
+import dts from "vite-plugin-dts";
+import { resolve } from 'path';
 
 // Calculate your version string once
 const LSCG_VERSION = (packageJson.version.length > 0 && packageJson.version[0] === 'v') 
@@ -20,14 +22,27 @@ if (window.LSCG_Loaded !== undefined) {
 window.LSCG_Loaded = false;
 console.debug("LSCG: Parse start...");\n`;
 
-export default defineConfig(({ mode }) => {
+//@ts-ignore
+export default defineConfig(({ mode: _ }) => {
     // Check if we are running the 'watch' script
-    const isDev = mode === 'development';
 
     return {
+        resolve: {
+            alias: {
+                "Utilities": resolve(__dirname, "./src/Utilities"),
+                "MiniGames": resolve(__dirname, "./src/MiniGames"),
+                "Settings": resolve(__dirname, "./src/Settings"),
+                "Modules": resolve(__dirname, "./src/Modules"),
+                "modules": resolve(__dirname, "./src/modules"),
+                "constants": resolve(__dirname, "./src/constants"),
+                "utils": resolve(__dirname, "./src/utils"),
+                "base": resolve(__dirname, "./src/base"),
+            },
+        },
         plugins: [
             tsconfigPaths(),
-            cssInjectedByJsPlugin() 
+            cssInjectedByJsPlugin(),
+            dts(),
         ],
         esbuild: {
             minifyIdentifiers: false, 
@@ -36,21 +51,22 @@ export default defineConfig(({ mode }) => {
         },
         build: {
             target: 'esnext',
-            emptyOutDir: false, 
-            minify: isDev ? false : 'esbuild', 
+            emptyOutDir: true, 
+            minify: "esbuild", 
             
             // Toggle sourcemap based on the mode!
-            sourcemap: isDev ? 'inline' : false, 
+            sourcemap: true, 
             
             lib: {
                 entry: 'src/main.tsx',
-                name: 'LSCG',
-                formats: ['iife'],
-                fileName: () => 'bundle.js'
+                name: 'Vendored_LSCG',
+                formats: ['es'],
+                fileName: (_, entry) => `${entry}.mjs`,
             },
             rollupOptions: {
                 output: {
-                    //banner: bannerCode,
+                    preserveModules: true,
+                    preserveModulesRoot: "src",
                     intro: `const LSCG_VERSION="${LSCG_VERSION}";`,
                     sourcemapExcludeSources: false,
                 },

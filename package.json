@@ -1,8 +1,24 @@
 {
-  "name": "ls-club-games",
-  "description": "Little Sera's Club Games",
+  "name": "@vendor/lscg",
+  "description": "Little Sera's Club Games (Vendored)",
   "version": "0.8.7",
-  "main": "dist/bundle.js",
+  "type": "module",
+  "main": "./dist/main.mjs",
+  "module": "./dist/main.mjs",
+  "types": "./dist/main.d.ts",
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "import": "./dist/main.mjs",
+      "types": "./dist/main.d.ts"
+    },
+    "./*": "./dist/*"
+  },
+  "typesVersions": {
+    "*": {
+      "*": ["dist/*", "dist/main.d.ts"]
+    }
+  },
   "scripts": {
     "build": "typed-scss-modules src --exportType=default --nameFormat=none && vite build",
     "watch": "vite build --watch --mode development",
@@ -45,6 +61,7 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
     "vite-plugin-css-injected-by-js": "^3.5.2",
+    "vite-plugin-dts": "^4.5.4",
     "vite-tsconfig-paths": "^6.1.1"
   }
 }
