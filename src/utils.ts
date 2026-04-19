@@ -245,6 +245,11 @@ export function SendAction(action: string, sender: Character | null = null) {
 	]});
 }
 
+export function SendEmote(action: string, sender: Character | null = null) {
+	let msg = replace_template(action, sender);
+	ChatRoomSendEmote(msg);
+}
+
 export function SendChat(msg: string) {
     ServerSend("ChatRoomChat", {Type: "Chat", Content: msg})
 }
