@@ -500,7 +500,8 @@ export class OpacityModule extends BaseModule {
         }, ModuleCategory.Opacity);
 
         patchFunction("CharacterAppearanceVisible", {
-            "const Excluded = HideItemExclude?.includes(GroupName + AssetName);": "const Excluded = HideItemExclude?.includes('*') || HideItemExclude?.includes(GroupName + AssetName);"
+            "const Excluded = HideItemExclude?.includes(GroupName + AssetName);" : 
+            "const Excluded = !((item.Property != null) && (item.Property.Hide != null) && (item.Property.Hide.indexOf(GroupName) >= 0)) && HideItemExclude?.includes('*') || HideItemExclude?.includes(GroupName + AssetName);"
         });
 
         // Prevent see-through items from contributing cross-group alpha masks (GroupAlpha) to other layers.
