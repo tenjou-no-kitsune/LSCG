@@ -5,3 +5,8 @@ dist/
 
 # ignore packed
 *.tgz
+test/**/.out/
+coverage/
+.cache/
+.vitest/
+build/

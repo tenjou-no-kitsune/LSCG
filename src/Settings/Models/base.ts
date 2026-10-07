@@ -4,6 +4,7 @@ export interface BaseSettingsModel {
     enabled: boolean;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- the base each module's stats extend
 export interface ModuleStats {
 
 }
@@ -62,6 +63,13 @@ export interface MiscSettingsModel extends BaseSettingsModel {
 }
 
 export interface OpacitySettingsModel extends OpacityPublicSettingsModel {
+}
+
+export interface LeashingPublicSettingsModel extends BaseSettingsModel {
+    /** Who we're clasped to, so everyone can tell who's held in place. Older versions don't send it */
+    clasps?: number[];
+    /** Where each of those clasps is anchored, on their side and the other's. Older versions don't send it */
+    claspSlots?: { member: number; slot?: string; pairedSlot?: string; role?: "line" | "anchor" }[];
 }
 
 export interface OpacityPublicSettingsModel extends BaseSettingsModel {
