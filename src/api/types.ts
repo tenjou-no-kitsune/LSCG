@@ -19,6 +19,9 @@ export interface LSCGModApi {
     readonly disposed: boolean;
     /** Runs `cb` once LSCG has fully initialized with the player's settings (immediately if it already has). */
     onReady(cb: () => void): void;
+    /** Saves the player's LSCG settings and syncs LSCG's public data (drug levels, states, your `storage.setPublic`
+     *  data) to the room now. Saves are batched to about one per second. Only available once LSCG is ready. */
+    sync(): void;
     /** Removes everything this extension registered and frees its id for re-registration. */
     dispose(): void;
     /** LSCG event hooks (capability "events"). */
@@ -29,12 +32,153 @@ export interface LSCGModApi {
     readonly activities: LSCGActivitiesApi;
     /** Custom drugs (capability "drugs"). */
     readonly drugs: LSCGDrugsApi;
+    /** Custom hypnosis suggestion instructions (capability "hypno.instructions"). */
+    readonly hypno: LSCGHypnoApi;
     /** Messages between players running your extension (capability "network"). */
     readonly network: LSCGNetworkApi;
     /** Data saved with the player's LSCG settings (capability "storage"). */
     readonly storage: LSCGStorageApi;
     /** Screens in LSCG's settings (capability "settings"). */
     readonly settings: LSCGSettingsApi;
+    /** Actions on the player through LSCG's modules, which the player allows per extension (capability "operations"). */
+    readonly operations: LSCGOperationsApi;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------------------------------------------
+
+/** What an extension can ask the player to let it do. Each scope covers one group of operations. */
+export type LSCGOperationScope = "magic" | "hypno" | "collar" | "leashing" | "states" | "drugs";
+
+export interface LSCGSpellbookEntry {
+    readonly name: string;
+    /** Effect ids, in the order they take hold. */
+    readonly effects: readonly string[];
+    readonly voiceCastable: boolean;
+    readonly potion: boolean;
+}
+
+export interface LSCGMagicOperations {
+    /** The spells the player knows. Empty while magic is off. */
+    list(): LSCGSpellbookEntry[];
+    /** Casts a spell the player knows on themself, as if they had cast it with the spell menu (its saving throw, durations and
+     *  blocked-effect settings all apply; questions the spell asks at cast time take their defaults). Returns false if it wasn't
+     *  cast: magic is off, the spell is unknown, needs a paired target, or every effect of it is blocked. */
+    castOnSelf(name: string): boolean;
+    /** Stops the effects of spells cast on the player that haven't taken hold yet. Returns how many spells were cut short. */
+    dispel(): number;
+}
+
+/** What `operations.hypno.binaural.getState()` tells you. */
+export interface LSCGBinauralState {
+    /** True if the player turned binaural beats on in their hypnosis settings. If false, nothing here can make them play. */
+    readonly enabled: boolean;
+    /** Whether a beat is sounding right now. */
+    readonly playing: boolean;
+    /** Whether the player is hypnotized. By default the beat plays exactly while they are. */
+    readonly hypnotized: boolean;
+    /** The beat (Hz) it is heading for or holding; 0 while silent. */
+    readonly beatHz: number;
+    /** The pitch (Hz) both ears are centred on. */
+    readonly carrierHz: number;
+    /** What you asked for with `setVolume`, 0 to 1 of the player's own volume setting. 1 until you change it. */
+    readonly volume: number;
+    /** The player's own volume setting, 0 to 1. The beat is never louder than this, whatever you ask. */
+    readonly maxVolume: number;
+}
+
+/** Binaural beats played while the player is hypnotized. They are the player's opt-in: until they turn them on in their hypnosis
+ *  settings, `play` returns false and nothing sounds. Their volume setting is the ceiling for everything here. By default the beat
+ *  fades in when hypnosis starts and fades out over a second when it ends; what you change here lasts until the trance ends. */
+/** How long a fade lasts, in seconds (0 to 60; 0 is as close to instant as it can be without a click). Leave it out for the default. */
+export interface LSCGBinauralFadeOptions {
+    fadeSeconds?: number;
+}
+
+export interface LSCGBinauralOperations {
+    getState(): LSCGBinauralState;
+    /** Plays the beat now, hypnotized or not (it still stops when a trance ends), fading in over `fadeSeconds` (default 10). If it is already playing, nothing changes. Returns false if the player hasn't opted in or has their sound off. */
+    play(options?: LSCGBinauralFadeOptions): boolean;
+    /** Fades the beat out over `fadeSeconds` (default 1). Returns whether it was playing. During a trance it stays off until that trance ends. */
+    stop(options?: LSCGBinauralFadeOptions): boolean;
+    /** Sets how loud, 0 to 1 of the player's own volume setting (it can only turn the beat down, never above what they chose). */
+    setVolume(volume: number): void;
+    /** Glides to a different beat (about 1 to 30 Hz; alpha is roughly 8 to 12, theta 4 to 7). Replaces the player's chosen pattern. */
+    setBeat(hz: number): void;
+}
+
+export interface LSCGHypnoOperations {
+    /** Binaural beats during hypnosis (capability "hypno.binaural"). */
+    readonly binaural: LSCGBinauralOperations;
+    /** Whether the player is under hypnosis now. */
+    isHypnotized(): boolean;
+    /** Puts the player under hypnosis, as a trigger word would. Returns false if hypnosis is off, they already are, or it is on cooldown. */
+    trigger(): boolean;
+    /** Wakes the player. Returns false if they weren't hypnotized. */
+    awaken(): boolean;
+}
+
+export interface LSCGCollarOperations {
+    /** 0 (loose) to 4 (passing out). Includes a choke from plugs, when worn. */
+    getChokeLevel(): number;
+    /** Tightens the player's collar one step. Returns false unless the collar is active and the player lets themself tighten it. */
+    tighten(): boolean;
+    /** Loosens the player's collar one step. Returns false unless the collar is active and the player lets themself loosen it. */
+    loosen(): boolean;
+    /** Lets the collar go fully loose. Always allowed while the collar is active. */
+    release(): boolean;
+}
+
+export interface LSCGGrabInfo {
+    /** Grab type, such as "arm", "collar", "leash" or "hand". */
+    readonly type: string;
+    /** The other player's member number. */
+    readonly member: number;
+    /** True when the player is the one holding; false when the player is the one held. */
+    readonly holding: boolean;
+}
+
+export interface LSCGLeashingOperations {
+    /** Every grab the player is part of. */
+    list(): LSCGGrabInfo[];
+    /** Lets go of what the player is holding (all of it, or one grab type). Returns how many grabs ended. */
+    release(type?: string): number;
+    /** Tries to break free of whoever holds the player, with the same check as `/lscg escape`. */
+    escape(): void;
+}
+
+export interface LSCGStatesOperations {
+    /** A state of the player (see `LSCGBuiltInStateType`), or undefined for one that can't be driven. */
+    get(type: LSCGBuiltInStateType): LSCGStateHandle | undefined;
+}
+
+export interface LSCGDrugOperations {
+    /** Same as `drugs.dose`, but only when the player has allowed the "drugs" scope. */
+    dose(type: LSCGDrugType, options?: LSCGDoseOptions): boolean;
+    /** Same as `drugs.getLevels()` for the player. */
+    getLevels(): LSCGDrugLevelInfo[];
+}
+
+/** Calls here act on the player only, never on someone else. Until the player allows an extension a scope (LSCG settings,
+ *  Extensions), any call in it throws an error named "LSCGPermissionError" and shows the request there. Each call still
+ *  keeps the player's own settings: it can return false, or do nothing, where they say no. Only usable once LSCG is ready. */
+export interface LSCGOperationsApi {
+    /** Every scope that exists. */
+    readonly scopes: readonly LSCGOperationScope[];
+    /** The scopes the player has allowed this extension so far. */
+    granted(): LSCGOperationScope[];
+    isGranted(scope: LSCGOperationScope): boolean;
+    /** Shows the player a request to allow these scopes (nothing is granted until they do). Calling a denied operation requests its scope too. */
+    request(scopes: LSCGOperationScope[], reason?: string): void;
+    /** Runs when the player allows or revokes one of this extension's scopes. Returns an unsubscribe function. */
+    onChange(handler: (granted: LSCGOperationScope[]) => void): () => void;
+    readonly magic: LSCGMagicOperations;
+    readonly hypno: LSCGHypnoOperations;
+    readonly collar: LSCGCollarOperations;
+    readonly leashing: LSCGLeashingOperations;
+    readonly states: LSCGStatesOperations;
+    readonly drugs: LSCGDrugOperations;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -143,6 +287,61 @@ export interface LSCGStorageApi {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------------------------------------------
+
+/** A value an option holds. */
+export type LSCGOptionValue = boolean | number | string;
+
+/** The current values of an effect's or drug's options, by field key. Always complete and valid when your code receives them. */
+export type LSCGOptions = Record<string, LSCGOptionValue>;
+
+interface LSCGOptionFieldBase {
+    /** Plain identifier (letters, digits, underscore); the name of the value in `ctx.options`. Unique within the declaration. */
+    key: string;
+    /** Shown beside the control. Defaults to `key`. */
+    label?: string;
+    /** Smaller text under the label. */
+    description?: string;
+}
+
+export interface LSCGToggleOption extends LSCGOptionFieldBase {
+    type: "toggle";
+    /** Default false. */
+    default?: boolean;
+}
+
+export interface LSCGNumberOption extends LSCGOptionFieldBase {
+    type: "number";
+    /** Default 0. */
+    min?: number;
+    /** Default `min` + 10. */
+    max?: number;
+    step?: number;
+    /** Default `min`. */
+    default?: number;
+}
+
+export interface LSCGSelectOption extends LSCGOptionFieldBase {
+    type: "select";
+    choices: LSCGKitOption[];
+    /** Default the first choice. */
+    default?: string;
+}
+
+export interface LSCGTextOption extends LSCGOptionFieldBase {
+    type: "text";
+    /** Default 200, at most 1000. */
+    maxLength?: number;
+    multiline?: boolean;
+    default?: string;
+}
+
+/** One setting players can change. Declare a list as `options` on a spell effect or a drug and LSCG draws the controls,
+ *  stores the values, validates them (also when they come from another player) and hands them to your callbacks as `ctx.options`. */
+export type LSCGOptionField = LSCGToggleOption | LSCGNumberOption | LSCGSelectOption | LSCGTextOption;
+
+// ---------------------------------------------------------------------------------------------------------------
 // Drugs
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -162,6 +361,8 @@ export interface LSCGDrugContext {
     sendAction(text: string): void;
     /** Built-in states the drug may activate or recover, e.g. to put the player to sleep at a high level. */
     readonly states: LSCGBuiltInStatesApi;
+    /** The player's current values for the drug's `options` (their defaults if it declares none). */
+    readonly options: LSCGOptions;
 }
 
 export interface LSCGDrugDoseContext extends LSCGDrugContext {
@@ -193,14 +394,20 @@ export interface LSCGDrugDefinition {
     /** One line for the settings and crafting screens. */
     description?: string;
     /** Phrases that make a crafted item this drug: if its name or description contains one, it's a dose. Case
-     *  and punctuation don't matter. Items must be a Medical Injector, Latex Respirator, Filled Glass or Mug. */
+     *  and punctuation don't matter. Items must be a Medical Injector, Latex Respirator, Filled Glass or Mug. A keyword followed by
+     *  "-soaked" or "-laced" on a crafted item in a mouth, nose or face slot soaks the wearer in it as well. */
     keywords: string[];
+    /** Phrases for soaked items when your plain keywords don't read well in front of "-soaked" or "-laced": "intoxicant" for an
+     *  "intoxicating" drug gives "intoxicant-laced". Your plain keywords work there too, so this is only for the better wording. */
+    soakKeywords?: string[];
     /** Colour of the level bar drawn beside the character, any CSS colour string (default a soft blue). */
     color?: string;
     /** The level that fills the bar (default 10). */
     max?: number;
     /** How much the level falls each minute (default 1; 0 means it never wears off by itself). */
     decayPerMinute?: number;
+    /** Settings the player can change under Drug Enhancements, next to the drug's opt-in. Read them from `ctx.options`. */
+    options?: LSCGOptionField[];
     /** Runs on the player when they take a dose. Players have to opt in to each drug in LSCG's settings first. */
     onDose(ctx: LSCGDrugDoseContext): void;
     /** Seconds between ticks, at least 1 (default 6). Sets how often `onTick` and `onSpike` can run and how often
@@ -224,7 +431,7 @@ export interface LSCGDrugDefinition {
     onWearOff?(ctx: LSCGDrugContext): void;
 }
 
-/** Where a dose comes from. Built-in drug types are "sedative", "mindcontrol", "horny" and "antidote"; an
+/** Where a dose comes from. Built-in drug types are "sedative", "mindcontrol", "horny", "suggestible" and "antidote"; an
  *  extension's drug is its namespaced id ("<extension id>.<name>"), yours or another extension's. */
 export type LSCGDrugType = "sedative" | "mindcontrol" | "horny" | "antidote" | (string & {});
 
@@ -242,6 +449,16 @@ export interface LSCGDoseOptions {
     minigame?: boolean;
 }
 
+export interface LSCGDrugLevelInfo {
+    /** "sedative", "mindcontrol", "horny", or an extension drug's id. */
+    readonly type: string;
+    readonly level: number;
+    /** The level that fills the bar. */
+    readonly max: number;
+    /** True when worked out from another player's last broadcast rather than read from your own settings. */
+    readonly estimated: boolean;
+}
+
 export interface LSCGDrugsApi {
     /** Registers a drug. Returns a function that unregisters it. */
     register(definition: LSCGDrugDefinition): () => void;
@@ -252,9 +469,14 @@ export interface LSCGDrugsApi {
      *  `drug.beforeApply` vetoes, and emits `drug.applied`. Returns false if nothing was applied (not enabled,
      *  vetoed, unknown drug, or Drug Enhancements turned off). An "antidote" clears every drug and ignores `multiplier`. */
     dose(type: LSCGDrugType, options?: LSCGDoseOptions): boolean;
-    /** The player's current level of a drug, from 0 to its max (0 for an unknown drug). Built-in levels are on LSCG's
-     *  internal scale, multiplied by the player's drug level multiplier. */
-    getLevel(type: LSCGDrugType): number;
+    /** A player's current level of a drug, from 0 to its max (0 for an unknown drug, or someone without LSCG). Built-in levels are on LSCG's
+     *  internal scale, multiplied by the player's drug level multiplier. With no `memberNumber` (or your own) it is exact. For someone
+     *  else it is an estimate: what their client last broadcast, decayed forward at the rate it broadcast since it arrived. It misses
+     *  anything that happened since their last broadcast. */
+    getLevel(type: LSCGDrugType, memberNumber?: number): number;
+    /** Every drug level above 0 for a player (yours with no `memberNumber`), built-in drugs first, then extensions'. `level / max` is
+     *  how full the bar is. `estimated` is true for anyone but you, with the same caveats as `getLevel`. */
+    getLevels(memberNumber?: number): LSCGDrugLevelInfo[];
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -307,7 +529,7 @@ export interface LSCGActivityDefinition {
     prerequisites?: string[];
     /** Where it can be done. At least one. */
     targets: LSCGActivityTarget[];
-    /** Icon shown in the activity menu: a BC asset path such as "Assets/Female3DCG/Activity/Slap.png". */
+    /** Icon shown in the activity menu: a BC asset path such as "Icons/Activity/Slap.png". */
     image?: string;
     /** Runs on the actor's client as the activity is sent. Return `false` to stop it being sent. */
     onSend?(ctx: LSCGActivitySendContext): boolean | void;
@@ -350,6 +572,50 @@ export interface LSCGBuiltInStatesApi {
     get(type: LSCGBuiltInStateType): LSCGStateHandle | undefined;
 }
 
+/** What a custom suggestion instruction's `perform` receives. Runs on the client of the hypnotized player, when a suggestion holding the
+ *  instruction fires and they don't resist it. */
+export interface LSCGHypnoInstructionContext {
+    /** This instruction's namespaced id ("<extension id>.<name>"). */
+    readonly instruction: string;
+    /** The name of the suggestion it belongs to. */
+    readonly suggestion: string;
+    /** The values chosen for this instruction when the suggestion was written, validated against your `options` (their defaults if you declare none). */
+    readonly options: LSCGOptions;
+    /** Member number of whoever spoke the trigger. */
+    readonly sender?: number;
+    /** Member number of whoever installed the suggestion. */
+    readonly installedBy?: number;
+    /** Sends an emote about the player. Supports %NAME%, %POSSESSIVE% and %OPP_NAME% (whoever spoke the trigger). */
+    sendAction(text: string): void;
+    /** Built-in states the instruction may activate or recover. */
+    readonly states: LSCGBuiltInStatesApi;
+}
+
+export interface LSCGHypnoInstructionDefinition {
+    /** Name within your extension; the instruction id becomes "<extension id>.<name>". No ".". */
+    name: string;
+    /** Shown in the suggestion editor and in the player's list of instructions they can block. */
+    label: string;
+    /** One line, shown in the editor and the block list. */
+    description?: string;
+    /** Settings whoever writes the suggestion can change, behind a "Configure..." button. Read them from `ctx.options`. */
+    options?: LSCGOptionField[];
+    /** A suggestion can hold it only once (default false). */
+    unrepeatable?: boolean;
+    /** Nothing can follow it in a suggestion (default false). */
+    terminating?: boolean;
+    /** Carries out the instruction on the player. Errors are contained and counted against your extension. Players can block any
+     *  instruction on themselves, in which case this never runs. */
+    perform(ctx: LSCGHypnoInstructionContext): void;
+}
+
+export interface LSCGHypnoApi {
+    /** Registers an instruction that suggestions can hold, next to LSCG's own. Returns a function that unregisters it. */
+    registerInstruction(definition: LSCGHypnoInstructionDefinition): () => void;
+    /** Unregisters one of this extension's instructions by name. */
+    unregisterInstruction(name: string): boolean;
+}
+
 /** What a custom spell effect's `apply` receives. Runs on the client of the player the spell hit. */
 export interface LSCGSpellEffectContext {
     /** This effect's namespaced id ("<extension id>.<name>"). */
@@ -363,6 +629,8 @@ export interface LSCGSpellEffectContext {
     sendAction(text: string): void;
     /** Built-in states the effect may activate or recover. */
     readonly states: LSCGBuiltInStatesApi;
+    /** The values the caster set for this copy of the effect in their spell, validated against your `options` (their defaults if you declare none). */
+    readonly options: LSCGOptions;
 }
 
 export interface LSCGSpellEffectDefinition {
@@ -376,10 +644,16 @@ export interface LSCGSpellEffectDefinition {
     beneficial?: boolean;
     /** Always give this effect a duration, even when the target allows unlimited-duration spells. */
     forcesDuration?: boolean;
+    /** Milliseconds this effect waits after the previous effect of the same spell before taking hold (default 2000, from 1000 to 30000; lower values are raised to 1000).
+     *  Ignored when it is the first effect, which always applies immediately. */
+    delay?: number;
     /** May be picked by wild magic (default false). */
     allowRandom?: boolean;
     /** Block the effect by default the first time a player sees it (they can unblock it in LSCG's Magic™ settings). */
     defaultBlocked?: boolean;
+    /** Settings the spell's author can change in the spell editor, one set for each copy of the effect in a spell. They travel
+     *  with the spell, so the target's client validates them again before `apply` sees them as `ctx.options`. */
+    options?: LSCGOptionField[];
     /** Applies the effect to the player. Errors are contained and counted against your extension. */
     apply(ctx: LSCGSpellEffectContext): void;
 }
@@ -421,6 +695,19 @@ export interface LSCGSpellInfo {
 
 export type LSCGStateRecoverReason = "expired" | "safeword" | "dispel" | "manual";
 export type LSCGDrugMethod = "drink" | "inject" | "breath";
+/** One instruction of a suggestion, as hypno events describe it. */
+export interface LSCGHypnoInstructionInfo {
+    /** The instruction's id: one of LSCG's own (e.g. "activity", "strip") or an extension's `"<id>.<name>"`. */
+    readonly instruction: string;
+    /** The suggestion's name. */
+    readonly suggestion: string;
+    /** The instruction's position in the suggestion, from 0. */
+    readonly index: number;
+    /** Member number of whoever spoke the trigger. */
+    readonly sender: number;
+    /** Member number of whoever installed the suggestion. */
+    readonly installedBy: number;
+}
 export type LSCGHypnoAwakenMethod = "word" | "boop" | "snap" | "timeout" | "other";
 export type LSCGPassoutReason = "collar" | "hand" | "plugs" | "chain";
 
@@ -438,13 +725,24 @@ export interface LSCGEventMap {
     /** The player saved against an incoming spell. `bounced` is true if a magic barrier sent it back to the caster. */
     "spell.resisted": { spell: LSCGSpellInfo; sender: number; bounced: boolean };
     /** A spell took hold on the player; `effects` are the ones that will be applied. */
-    "spell.received": { spell: LSCGSpellInfo; sender?: number; effects: string[]; duration?: number };
+    "spell.received": { spell: LSCGSpellInfo; sender?: number; effects: string[]; duration?: number;
+        /** For each of `effects`, how long (ms) after the spell arrived it takes hold. The first is 0. */
+        delays: number[] };
+    /** A spell's remaining effects were cancelled before they took hold. `reason`: the target was dispelled, used safeword, or LSCG unloaded. */
+    "spell.interrupted": { spell: LSCGSpellInfo; sender?: number; reason: "dispel" | "safeword" | "unload"; effects: string[] };
     /** One effect of a spell was applied to the player. */
     "spell.effectApplied": { effect: string; spell: LSCGSpellInfo; sender?: number; duration?: number };
     /** The player was hypnotized by a trigger. `byWord` is false when triggered some other way (e.g. an activity). */
     "hypno.triggered": { by?: number; byWord: boolean };
     /** The player was brought out of a trigger hypnosis. */
     "hypno.awakened": { method: LSCGHypnoAwakenMethod; by?: number };
+    /** A binaural beat started or stopped (capability "hypno.binaural"). `beatHz` and `volume` (0 to 1 gain) describe it while `playing`, and are 0 otherwise. */
+    "hypno.binauralChanged": { playing: boolean; beatHz: number; volume: number };
+    /** A suggestion's trigger was spoken and the player either resisted it or submitted (its instructions are about to run). */
+    "hypno.suggestionResolved": { suggestion: string; sender: number; installedBy: number; resisted: boolean };
+    /** One instruction of a suggestion ran, built-in or from an extension. It ran, which isn't the same as succeeding: an Activity
+     *  whose target has left, for instance, still counts. Not fired for blocked or vetoed instructions. */
+    "hypno.instructionPerformed": LSCGHypnoInstructionInfo;
     /** The player sent an activity. `isLSCG` is true for LSCG's own (and LSCG-patched) activities. */
     "activity.sent": { name: string; group?: string; target?: number; isLSCG: boolean };
     /** An activity targeting the player was performed (including by the player on themselves). */
@@ -456,6 +754,9 @@ export interface LSCGEventMap {
     /** A drug's level changed, including slow decay (built-in or extension). `level` and `max` are on the same scale
      *  as `LSCGDrugsApi.getLevel`; `level / max` is the fraction of the bar, e.g. to apply effects at thresholds. */
     "drug.levelChanged": { type: string; previous: number; level: number; max: number };
+    /** Someone asked a suggestible player to do something ("<name>, would you kindly <phrase>") and they felt the urge. `level` and
+     *  `max` are the suggestible bar. Nothing is forced: the player only gets a prompt. */
+    "drug.suggestionUrge": { sender: number; phrase: string; level: number; max: number };
     /** A drug took effect on the player. */
     "drug.applied": { types: string[]; method: LSCGDrugMethod; sender?: number; location?: string };
     /** The player's collar choke level changed. */
@@ -473,13 +774,17 @@ export interface LSCGEventMap {
 /** Events with a "before" phase. Handlers may cancel the action or change the fields documented as mutable. */
 export interface LSCGBeforeEventMap {
     /** Before an incoming spell takes hold. Mutable: `duration`; `effects` may only have entries removed. Cancel: the spell fizzles. */
-    "spell.beforeReceive": { readonly spell: LSCGSpellInfo; readonly sender?: number; effects: string[]; duration?: number };
+    "spell.beforeReceive": { readonly spell: LSCGSpellInfo; readonly sender?: number; effects: string[]; duration?: number; delay?: number };
     /** Before one effect of a spell is applied. Mutable: `duration`. Cancel: that effect fizzles. */
     "spell.beforeEffect": { readonly effect: string; readonly spell: LSCGSpellInfo; readonly sender?: number; duration?: number };
     /** Before another player's grab on the player takes hold. Cancel: the grab is refused and released on both sides. */
     "grab.beforeIncoming": { readonly type: string; readonly sender: number };
-    /** Before a drug takes effect. Mutable: `types` may only have entries removed. Cancel: nothing is applied. */
-    "drug.beforeApply": { types: string[]; readonly method: LSCGDrugMethod; readonly sender?: number; readonly location?: string };
+    /** Before a drug takes effect. Mutable: `types` may only have entries removed, and `strength` may only be lowered (0 to 1, default 1; it
+     *  scales the dose, so a drink of 2 at strength 0.5 adds 1). Cancel: nothing is applied. */
+    "drug.beforeApply": { types: string[]; strength?: number; readonly method: LSCGDrugMethod; readonly sender?: number; readonly location?: string };
+    /** Before one instruction of a suggestion runs, after the player has submitted and not blocked it. Nothing is mutable. Cancel: that one
+     *  instruction is skipped silently and the rest of the suggestion carries on. */
+    "hypno.beforeInstruction": LSCGHypnoInstructionInfo;
 }
 
 export type LSCGEventName = keyof LSCGEventMap;
@@ -518,7 +823,8 @@ export interface LSCGGlobal {
     readonly isReady: boolean;
     /** Runs `cb` once LSCG is ready (immediately if it already is). */
     onReady(cb: () => void): void;
-    /** Registers an extension and returns its handle. Throws if the id is invalid or already registered. */
+    /** Registers an extension and returns its handle. Calling it again with an id that is already registered returns the same handle; it
+     *  throws if the id is invalid, or the player turned the extension off. */
     getModApi(info: LSCGExtensionInfo): LSCGModApi;
 }
 

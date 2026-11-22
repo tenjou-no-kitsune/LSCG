@@ -37,6 +37,9 @@ export interface SelectOption {
     label: string;
     /** Options with the same group, next to each other, are listed under that heading. */
     group?: string;
+    /** A smaller grey italic note after the label (an internal name, say). Needs the hand-built select; where the browser can't
+     *  style part of an option it is appended as " [detail]". */
+    detail?: string;
     /** Drawn before the label where the browser supports rich dropdowns (customizable select, Chromium 135+). */
     icon?: KitIcon;
 }
@@ -75,12 +78,31 @@ function bindDisabled(ctx: KitContext, el: HTMLInputElement | HTMLSelectElement 
     if (disabled) ctx.watch(() => { el.disabled = disabled(); });
 }
 
-export function CheckboxRow(ctx: KitContext, props: RowProps<boolean>): HTMLElement {
+/** A checkbox row; `inline` adds controls (such as InlineCheckbox) beside its checkbox. */
+export function CheckboxRow(ctx: KitContext, props: RowProps<boolean> & { inline?: HTMLElement[] }): HTMLElement {
     const id = uid("cb");
     const input = ElementCheckbox.Create(id, () => { props.set(input.checked); ctx.changed(); });
     ctx.watch(() => { input.checked = !!props.get(); });
     bindDisabled(ctx, input, props.disabled);
-    return row(ctx, props, id, input);
+    if (!props.inline?.length)
+        return row(ctx, props, id, input);
+    return row(ctx, props, id, <div class="lscg-kit-inline-group">{input}{props.inline}</div> as HTMLElement);
+}
+
+/** A smaller labelled checkbox for a sub-option, to sit inside another row's control. `description` is its tooltip. */
+export function InlineCheckbox(ctx: KitContext, props: RowProps<boolean>): HTMLElement {
+    const id = uid("cb");
+    const input = ElementCheckbox.Create(id, () => { props.set(input.checked); ctx.changed(); });
+    ctx.watch(() => { input.checked = !!props.get(); });
+    bindDisabled(ctx, input, props.disabled);
+    const el = (
+        <span class="lscg-kit-inline-check" title={props.description ?? ""}>
+            {input}
+            <label for={id}>{props.label}</label>
+        </span>
+    ) as HTMLElement;
+    if (props.hidden) ctx.watch(() => { el.hidden = props.hidden!(); });
+    return el;
 }
 
 export function TextRow(ctx: KitContext, props: RowProps<string> & { placeholder?: string; maxLength?: number; multiline?: boolean }): HTMLElement {
@@ -134,13 +156,14 @@ function groupOptions(options: SelectOption[]): [string | undefined, SelectOptio
 
 function createSelect(options: SelectOption[], id: string, onChange: (value: string) => void): HTMLSelectElement {
     // BC's dropdown for plain lists; icons and groups (optgroup) need the hand-built select below.
-    if (!options.some(o => o.icon || o.group))
+    if (!options.some(o => o.icon || o.group || o.detail))
         return ElementDropdown.Create(id, options.map(o => ({ tag: "option" as const, attributes: { value: o.value }, children: [o.label] })), function () { onChange(this.value); });
-    const rich = richSelects && options.some(o => !!o.icon);
+    const rich = richSelects && options.some(o => !!o.icon || !!o.detail);
     const select = <select id={id} class={rich ? "lscg-kit-select-rich" : ""} onChange={() => onChange(select.value)}>
         {groupOptions(options).map(([group, opts]) => {
             const items = opts.map(o => <option value={o.value}>
                 {o.icon ? (richSelects ? Icon(o.icon) : `${ICON_GLYPHS[o.icon]} `) : null}{o.label}
+                {o.detail ? (richSelects ? <span class="lscg-kit-option-detail">{`[${o.detail}]`}</span> : ` [${o.detail}]`) : null}
             </option>);
             return group ? <optgroup label={group}>{items}</optgroup> : items;
         })}
@@ -247,6 +270,8 @@ export interface ZonePickerProps {
 export function ZonePicker(ctx: KitContext, props: ZonePickerProps): HTMLCanvasElement {
     // Drawn on a standing copy (same worn items, base poses), so kneeling etc. doesn't hide zones; deleted when done.
     const C = CharacterLoadSimple(uid("zones"));
+    // CharacterLoadSimple leaves ArousalSettings empty; mods' ScriptDraw hooks (e.g. Echo's) read ArousalSettings.Zone while drawing.
+    C.ArousalSettings = structuredClone(props.character.ArousalSettings);
     C.Appearance = AppearanceItemParse(CharacterAppearanceStringify(props.character));
     PoseSetActive(C, "BaseUpper", true);
     PoseSetActive(C, "BaseLower", true);
@@ -468,11 +493,16 @@ export interface RuleTableProps<R> {
     canDelete?: (row: R) => boolean;
     /** Called after a row is removed. */
     onDelete?: (row: R) => void;
+    /** Rows are shown in order, each run with the same group in a fieldset of its own, whose legend folds it away when clicked. */
+    groupOf?: (row: R) => string | undefined;
+    /** The groups folded away right now. Pass one to keep them folded when the table is built again; otherwise all start open. */
+    collapsedGroups?: Set<string>;
 }
 
 /** Editable list of records. Re-renders itself on any change; fine for the small row counts it's meant for. */
 export function RuleTable<R>(ctx: KitContext, props: RuleTableProps<R>): HTMLElement {
     const container = <div class="lscg-kit-table-wrap" /> as HTMLElement;
+    const collapsed = props.collapsedGroups ?? new Set<string>();
 
     const cell = (r: R, col: RuleColumn<R>, readOnly: boolean): HTMLElement => {
         if (col.hidden?.(r)) return <td /> as HTMLElement;
@@ -508,6 +538,20 @@ export function RuleTable<R>(ctx: KitContext, props: RuleTableProps<R>): HTMLEle
         return <td>{control}</td> as HTMLElement;
     };
 
+    /** The legend of a group's fieldset: a button that opens and closes it, with how many rows are in it. */
+    const groupLegend = (group: string, count: number): HTMLElement => {
+        const open = !collapsed.has(group);
+        const toggle = <button type="button" class="lscg-kit-group-toggle" aria-expanded={String(open)} onClick={() => {
+            if (collapsed.has(group)) collapsed.delete(group); else collapsed.add(group);
+            ctx.refresh(); // what is shown changes, not any setting
+        }}>
+            <span class="lscg-kit-group-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            <span class="lscg-kit-group-name">{group}</span>
+            <span class="lscg-kit-group-count">{count}</span>
+        </button> as HTMLElement;
+        return <legend>{toggle}</legend> as HTMLElement;
+    };
+
     const render = () => {
         const rows = props.rows();
         const readOnly = props.readOnly?.() ?? false;
@@ -518,26 +562,61 @@ export function RuleTable<R>(ctx: KitContext, props: RuleTableProps<R>): HTMLEle
             ctx.changed();
         }, { class: "lscg-kit-add", disabled: readOnly || rows.length >= max });
 
+        // `widths` off leaves them to a colgroup, which is how the boxes' columns are sized (see below).
+        const headerRow = (widths = true) => <tr>{props.columns.map(c => (
+            <th style={widths && c.width ? { width: c.width } : {}} title={c.tooltip ?? ""} class={[c.tooltip ? "lscg-kit-has-tip" : "", c.kind === "checkbox" ? "lscg-kit-center" : ""].filter(Boolean).join(" ")}>{c.header}</th>
+        ))}{props.fixed ? null : <th class={widths ? "lscg-kit-delete-col" : ""} />}</tr> as HTMLElement;
+
+        /** `i` is the row's place in the whole list (what a delete removes); `stripe` its place in the run it is striped in. */
+        const line = (r: R, i: number, stripe: number): HTMLElement => (
+            <tr class={stripe % 2 === 1 ? "lscg-kit-stripe" : ""}>
+                {props.columns.map(c => cell(r, c, readOnly))}
+                {props.fixed ? null : <td>
+                    {Button("✕", () => {
+                        rows.splice(i, 1);
+                        props.onDelete?.(r);
+                        ctx.changed();
+                    }, { class: "lscg-kit-delete", ariaLabel: props.deleteLabel ?? "Delete rule", disabled: readOnly || props.canDelete?.(r) === false })}
+                </td>}
+            </tr>
+        ) as HTMLElement;
+
+        let tables: HTMLElement[];
+        // Nothing to group (the caller opted out of it for now) is just a table.
+        if (!props.groupOf || rows.every(r => props.groupOf!(r) === undefined)) {
+            tables = [<table class="lscg-kit-table">
+                <thead>{headerRow()}</thead>
+                <tbody>{rows.map((r, i) => line(r, i, i))}</tbody>
+            </table> as HTMLElement];
+        } else {
+            // Each run of rows with the same group is a fieldset of its own, holding all of them, under one set of column headings.
+            const groups: { name: string | undefined; items: { r: R; i: number }[] }[] = [];
+            rows.forEach((r, i) => {
+                const name = props.groupOf!(r);
+                const last = groups.at(-1);
+                if (last && last.name === name) last.items.push({ r, i });
+                else groups.push({ name, items: [{ r, i }] });
+            });
+            const columns = () => <colgroup>
+                {props.columns.map(c => <col style={c.width ? { width: c.width } : {}} />)}
+                {props.fixed ? null : <col style={{ width: "3em" }} />}
+            </colgroup> as HTMLElement;
+            tables = [
+                // The same colgroup as every box, not widths on the headings: an em on a heading is its own, smaller, font's em, and
+                // the columns would drift out from under it.
+                <table class="lscg-kit-table lscg-kit-table-head">{columns()}<thead>{headerRow(false)}</thead></table> as HTMLElement,
+                ...groups.map(group => <fieldset class="lscg-kit-fieldset">
+                    {group.name === undefined ? null : groupLegend(group.name, group.items.length)}
+                    {group.name !== undefined && collapsed.has(group.name) ? null : <table class="lscg-kit-table">
+                        {columns()}
+                        <tbody>{group.items.map(({ r, i }, k) => line(r, i, k))}</tbody>
+                    </table>}
+                </fieldset> as HTMLElement),
+            ];
+        }
+
         container.replaceChildren(
-            <table class="lscg-kit-table">
-                <thead><tr>{props.columns.map(c => (
-                    <th style={c.width ? { width: c.width } : {}} title={c.tooltip ?? ""} class={c.tooltip ? "lscg-kit-has-tip" : ""}>{c.header}</th>
-                ))}{props.fixed ? null : <th class="lscg-kit-delete-col" />}</tr></thead>
-                <tbody>
-                    {rows.map((r, i) => (
-                        <tr>
-                            {props.columns.map(c => cell(r, c, readOnly))}
-                            {props.fixed ? null : <td>
-                                {Button("✕", () => {
-                                    rows.splice(i, 1);
-                                    props.onDelete?.(r);
-                                    ctx.changed();
-                                }, { class: "lscg-kit-delete", ariaLabel: props.deleteLabel ?? "Delete rule", disabled: readOnly || props.canDelete?.(r) === false })}
-                            </td>}
-                        </tr>
-                    ))}
-                </tbody>
-            </table>,
+            ...tables,
             props.fixed ? <span /> : <div class="lscg-kit-table-footer">{add}<small class="lscg-kit-desc">{`${rows.length} / ${props.max}`}</small></div>,
         );
     };

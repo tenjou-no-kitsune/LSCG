@@ -1,7 +1,12 @@
+import { DEFAULT_REMOTE_LEVEL, REMOTE_TRANCE_DEFAULTS } from "./remoteAccess";
 import { BaseModule } from "base";
 import { HypnoInfluence, HypnoSettingsModel, LSCGHypnoInstruction } from "Settings/Models/hypno";
+import { extensionInstructions, isExtensionInstruction, sanitizeExtensionInstruction } from "api/hypno";
+import { sanitizeOptions } from "api/options";
+import { cleanDelay } from "stepDelay";
+import { builtInStates } from "api/builtInStates";
 import { ModuleCategory, Subscreen } from "Settings/setting_definitions";
-import { settingsSave, parseMsgWords, OnAction, OnActivity, SendAction, getRandomInt, hookFunction, removeAllHooksByModule, isAllowedMember, isPhraseInString, GetTargetCharacter, GetDelimitedList, GetActivityEntryFromContent, escapeRegExp, IsActivityAllowed, LSCG_SendLocal, getCharacter, sendLSCGCommandBeep, htmlToElement, getCharacterByNicknameOrMemberNumber, getActivities, isCloth, replace_template, hookBCXVoice, parseFromBase64 } from "../utils";
+import { settingsSave, parseMsgWords, OnAction, OnActivity, SendAction, getRandomInt, hookFunction, removeAllHooksByModule, isAllowedMember, isPhraseInString, GetTargetCharacter, GetDelimitedList, GetActivityEntryFromContent, escapeRegExp, IsActivityAllowed, LSCG_SendLocal, getCharacter, sendLSCGCommandBeep, htmlToElement, getCharacterByNicknameOrMemberNumber, getActivities, isCloth, replace_template, hookBCXVoice, parseFromBase64, IsBlockedSender, getPlayerVolume } from "../utils";
 import { GuiHypno } from "Settings/hypno";
 import { getModule } from "modules";
 import { ActivityEntryModel } from "Settings/Models/activities";
@@ -13,13 +18,19 @@ import { SuggestionMiniGame } from "MiniGames/Suggestion";
 import { registerMiniGame } from "MiniGames/minigames";
 import { StateRestrictions } from "./States/BaseState";
 import { Leashing, LeashingModule } from "./leashing";
-import { emit } from "api/events";
+import { emit, emitBefore } from "api/events";
 import type { LSCGHypnoAwakenMethod } from "api/types";
 import {
     CHECK_INTERVALS,
     EFFECT_DURATIONS,
     TRIGGER_TIMES,
+    SPIRAL_TURN_SECONDS,
+    BINAURAL_BEATS,
+    type BinauralPresetName,
 } from "../constants";
+import {
+    binauralInfo, binauralSupported, setBinauralBeat, setBinauralGain, startBinaural, stopBinaural,
+} from "Dom/binauralBeats";
 
 export class SuggestionMiniGameOptions {
     constructor(suggestion: HypnoSuggestion, sender: Character, command: string) {
@@ -41,12 +52,16 @@ export class SuggestionMiniGameOptions {
 }
 
 export class HypnoInstruction {
-    constructor(type: LSCGHypnoInstruction) {
+    constructor(type: LSCGHypnoInstruction | string) {
         this.type = type;
         this.arguments = {};
     }
-    type: LSCGHypnoInstruction = LSCGHypnoInstruction.none;
+    /** One of LSCG's own instruction types, or an extension's namespaced id ("<extension id>.<name>"). */
+    type: LSCGHypnoInstruction | string = LSCGHypnoInstruction.none;
     arguments: any = {};
+    /** How long (ms) this instruction waits after the one before it, if the suggestion's writer chose. Missing means the default. The first
+     *  instruction always happens at once. */
+    delay?: number;
 }
 export class HypnoSuggestion {
     constructor(name: string) {
@@ -85,19 +100,30 @@ export class HypnoModule extends BaseModule {
             overrideWords: "",
             allowLocked: false,
             remoteAccess: false,
-            remoteAccessRequiredTrance: true,
+            remoteLevel: DEFAULT_REMOTE_LEVEL,
+            remoteMemberIds: "",
+            useGlobalRemote: true,
+            remoteAccessRequiredTrance: REMOTE_TRANCE_DEFAULTS.HypnoModule.trance,
             allowRemoteModificationOfMemberOverride: false,
             cooldownTime: 0,
             enableArousal: false,
             enableSpirals: true,
+            enableSpiralOverlay: true,
+            spiralTurnSeconds: SPIRAL_TURN_SECONDS.DEFAULT,
             enableSnapWakeup: true,
+            enableBinaural: false,
+            binauralVolume: BINAURAL_BEATS.VOLUME_PERCENT.DEFAULT,
+            binauralPreset: BINAURAL_BEATS.DEFAULT_PRESET,
             trigger: "",
             triggerRevealed: false,
             triggerTime: TRIGGER_TIMES.DEFAULT_TRIGGER_TIME_MINUTES,
             locked: false,
             awakeners: "",
-            limitRemoteAccessToHypnotizer: false,
+            limitRemoteAccessToHypnotizer: REMOTE_TRANCE_DEFAULTS.HypnoModule.hypnotizerOnly,
             suggestionRequireHypnotizer: true,
+            blockedInstructions: <string[]>[],
+            alwaysSubmit: false,
+            alwaysSubmitMemberIds: "",
             hypnoEyeColor: "#A2A2A2",
             hypnoEyeType: 9,
             speakTriggers: "",
@@ -109,6 +135,7 @@ export class HypnoModule extends BaseModule {
     }
 
     safeword(): void {
+        this.CancelPendingInstructions();
         this.StateModule.HypnoState.Recover();
         this.settings.allowSuggestions = false;
         this.settings.allowSuggestionRemoval = true;
@@ -270,6 +297,8 @@ export class HypnoModule extends BaseModule {
             Priority: handlerPriority, // Try to make sure we run last. Other mods could potentially add handlers after this depending on arbitrary load order.
             Description: "LSCG Hypnosis Trigger Checks",
             Callback: (data: ServerChatRoomMessage, sender: Character, msg: string, metadata?: IChatRoomMessageMetadata) => {
+                if (IsBlockedSender(data.Sender))
+                    return false;
                 if (data.Type == "Chat" || data.Type == "Whisper") {
                     const newMsg = this.BlankOutTriggers(msg, sender);
                     if (!this.TopLevelCheckTriggers(msg, sender))
@@ -287,6 +316,7 @@ export class HypnoModule extends BaseModule {
         const bcxCheckInterval = CHECK_INTERVALS.BCX_CHECK;
         const lastbcxCheck = CommonTime();
         hookFunction("TimerProcess", 1, (args, next) => {
+            this.syncBinaural();
             if (ActivityAllowed()) {
                 const now = CommonTime();
                 const triggerTimer = (this.settings.triggerTime ?? TRIGGER_TIMES.DEFAULT_TRIGGER_TIME_MINUTES) * 60000;
@@ -414,12 +444,22 @@ export class HypnoModule extends BaseModule {
             Player.IsLoverOfMemberNumber(sender);
     }
 
+    /** Whether `sender` may see and change the player's suggestions: hypnosis on, and then the owner or a lover always, anyone
+     *  else only while the player is hypnotized, has allowed suggestions, is not limited to their hypnotizer (or it's them) and
+     *  item permission (or the override member list) lets them. */
+    CanModifySuggestions(sender: number): boolean {
+        if (!this.Enabled)
+            return false;
+        if (this._senderCanAlwaysModifySuggestions(sender))
+            return true;
+        const hypnotizer = this.StateModule.HypnoState.config.activatedBy;
+        const hypnotizerOk = !this.settings.suggestionRequireHypnotizer || hypnotizer == sender || hypnotizer == -1;
+        return this.hypnoActivated && !!this.settings.allowSuggestions && hypnotizerOk &&
+            this.allowedSpeaker(getCharacter(sender) ?? undefined);
+    }
+
     SuggestionsRequestHandler(sender: number, msg: LSCGMessageModel){
-        if (this.Enabled &&
-            this._senderCanAlwaysModifySuggestions(sender) ||
-                (this.hypnoActivated &&
-                this.settings.allowSuggestions &&
-                this.allowedSpeaker(getCharacter(sender) ?? undefined))) {
+        if (this.CanModifySuggestions(sender)) {
                 sendLSCGCommandBeep(sender, "get-suggestions-response", [{
                     name: "suggestions",
                     value: this.settings.suggestions?.filter(s => s.installedBy == sender || !s.exclusive || this._senderCanAlwaysModifySuggestions(sender)) ?? [],
@@ -432,11 +472,7 @@ export class HypnoModule extends BaseModule {
 
     SuggestionsPushHandler(sender: number, msg: LSCGMessageModel) {
         const senderChar = getCharacter(sender);
-        if (this.Enabled &&
-            this._senderCanAlwaysModifySuggestions(sender) ||
-                (this.hypnoActivated &&
-                this.settings.allowSuggestions &&
-                this.allowedSpeaker(senderChar ?? undefined))) {
+        if (this.CanModifySuggestions(sender)) {
                     if (!this.settings.suggestions)
                         this.settings.suggestions = [];
                     const incomingSuggestions = (msg.command?.args.find(a => a.name == "suggestions")?.value as HypnoSuggestion[]).filter(s => !!s.trigger) ?? [];
@@ -444,6 +480,17 @@ export class HypnoModule extends BaseModule {
                     if (!incomingSuggestions)
                         return;
                     incomingSuggestions.forEach(incoming => {
+                        // Extension instructions arrive with options nobody here has checked: keep only what their declaration allows.
+                        if (Array.isArray(incoming.instructions))
+                            incoming.instructions.forEach(instruction => {
+                                sanitizeExtensionInstruction(instruction);
+                                // A delay is a number of ms within the limits, or not there at all.
+                                const delay = cleanDelay(instruction?.delay);
+                                if (instruction && typeof instruction === "object") {
+                                    if (delay === undefined) delete instruction.delay;
+                                    else instruction.delay = delay;
+                                }
+                            });
                         const existing = this.settings.suggestions.find(s => s.id == incoming.id);
                         if (!existing) {
                             this.settings.suggestions.push(incoming);
@@ -453,9 +500,9 @@ export class HypnoModule extends BaseModule {
                         }
                         else Object.assign(existing, incoming);
                     });
-                    removedSuggestions.forEach(removed => {
+                    (removedSuggestions ?? []).forEach(removed => {
                         const ix = this.settings.suggestions.findIndex(s => s.id == removed.id);
-                        this.settings.suggestions.splice(ix, 1);
+                        if (ix > -1) this.settings.suggestions.splice(ix, 1);
                     });
                     if (!AudioShouldSilenceSound(true))
                         AudioPlaySoundEffect("BellSmall");
@@ -479,7 +526,124 @@ export class HypnoModule extends BaseModule {
     }
 
     unload(): void {
+        this.CancelPendingInstructions();
         removeAllHooksByModule(ModuleCategory.Hypno);
+        this.binauralMode = "auto";
+        this.syncBinaural();
+    }
+
+    // -- Binaural beats ---------------------------------------------------------------------------------------------------
+    // Played only if the player opted in. They follow the trance (fading in when it starts, out when it ends); extensions
+    // can steer them within the player's own volume setting through `operations.hypno.binaural`.
+
+    /** "auto" follows the trance; "on" plays regardless (an extension asked); "off" is silent for the rest of this trance. Reset when it ends. */
+    binauralMode: "auto" | "on" | "off" = "auto";
+    /** Fraction (0 to 1) of the player's volume setting an extension has asked for. */
+    binauralLevel: number = 1;
+    /** One-shot fade lengths (seconds) an extension asked for with its next play or stop. */
+    private binauralFadeIn?: number;
+    private binauralFadeOut?: number;
+    /** Beat (Hz) an extension asked for; replaces the preset until the trance ends. */
+    binauralBeatOverride?: number;
+
+    get binauralOptedIn(): boolean {
+        return !!this.settings?.enableBinaural && binauralSupported();
+    }
+
+    private binauralWanted(): boolean {
+        if (!this.Enabled || !this.binauralOptedIn || AudioShouldSilenceSound(true))
+            return false;
+        return this.binauralMode === "on" || (this.binauralMode === "auto" && this.hypnoActivated);
+    }
+
+    /** Gain for the engine: the player's volume setting, scaled by what an extension asked for and by BC's own volume. */
+    private binauralGain(): number {
+        const percent = Math.min(BINAURAL_BEATS.VOLUME_PERCENT.MAX, Math.max(0, Number(this.settings.binauralVolume ?? BINAURAL_BEATS.VOLUME_PERCENT.DEFAULT)));
+        const bcVolume = Number(getPlayerVolume(0));
+        return (percent / 100) * BINAURAL_BEATS.MAX_GAIN * this.binauralLevel * (Number.isFinite(bcVolume) ? Math.min(1, Math.max(0, bcVolume)) : 1);
+    }
+
+    /** Starts, stops or retunes the beat so it matches what is wanted now. Cheap; called every tick and wherever hypnosis changes. */
+    syncBinaural(): void {
+        const wanted = this.binauralWanted();
+        const info = binauralInfo();
+        if (wanted && !info.playing) {
+            const preset = BINAURAL_BEATS.PRESETS[this.settings.binauralPreset as BinauralPresetName] ?? BINAURAL_BEATS.PRESETS[BINAURAL_BEATS.DEFAULT_PRESET];
+            const override = this.binauralBeatOverride;
+            if (startBinaural({
+                fromHz: override ?? preset.from,
+                toHz: override ?? preset.to,
+                glideSeconds: override === undefined ? preset.glideSeconds : 0,
+                gain: this.binauralGain(),
+                fadeInSeconds: this.binauralFadeIn,
+            })) {
+                const now = binauralInfo();
+                emit("hypno.binauralChanged", { playing: true, beatHz: now.beatHz, volume: now.gain });
+            }
+        } else if (!wanted && info.playing) {
+            stopBinaural(this.binauralFadeOut);
+            emit("hypno.binauralChanged", { playing: false, beatHz: 0, volume: 0 });
+        } else if (wanted) {
+            const gain = this.binauralGain();
+            if (Math.abs(gain - info.gain) > 0.001)
+                setBinauralGain(gain);
+        }
+    }
+
+    /** Called when hypnosis starts or ends. Whatever an extension steered ends with the trance. */
+    onTranceChanged(): void {
+        if (!this.hypnoActivated) {
+            this.binauralMode = "auto";
+            this.binauralLevel = 1;
+            this.binauralBeatOverride = undefined;
+        }
+        this.syncBinaural();
+    }
+
+    binauralState() {
+        const info = binauralInfo();
+        return {
+            enabled: this.binauralOptedIn,
+            playing: info.playing,
+            hypnotized: this.hypnoActivated,
+            beatHz: info.beatHz,
+            carrierHz: info.carrierHz,
+            volume: this.binauralLevel,
+            maxVolume: Math.min(100, Math.max(0, this.settings.binauralVolume ?? 0)) / 100,
+        };
+    }
+
+    /** Plays the beat now, trance or not. Returns false if the player hasn't opted in or the sound is silenced. */
+    playBinaural(fadeInSeconds?: number): boolean {
+        this.binauralMode = "on";
+        this.binauralFadeIn = fadeInSeconds;
+        this.syncBinaural();
+        this.binauralFadeIn = undefined;
+        const playing = binauralInfo().playing;
+        if (!playing) this.binauralMode = "auto";
+        return playing;
+    }
+
+    /** Fades the beat out now (over `fadeOutSeconds`, or the default); during a trance it stays off until the trance ends. Returns whether it was playing. */
+    stopBinaural(fadeOutSeconds?: number): boolean {
+        const was = binauralInfo().playing;
+        this.binauralMode = this.hypnoActivated ? "off" : "auto";
+        this.binauralFadeOut = fadeOutSeconds;
+        this.syncBinaural();
+        this.binauralFadeOut = undefined;
+        return was;
+    }
+
+    /** `level` is 0 to 1 of the player's volume setting. */
+    setBinauralLevel(level: number): void {
+        this.binauralLevel = Math.min(1, Math.max(0, Number.isFinite(level) ? level : 0));
+        this.syncBinaural();
+    }
+
+    setBinauralBeatHz(hz: number): void {
+        const beat = Math.min(BINAURAL_BEATS.MAX_BEAT_HZ, Math.max(BINAURAL_BEATS.MIN_BEAT_HZ, Number.isFinite(hz) ? hz : BINAURAL_BEATS.MIN_BEAT_HZ));
+        this.binauralBeatOverride = beat;
+        setBinauralBeat(beat);
     }
 
     get awakeners(): string[] {
@@ -490,8 +654,9 @@ export class HypnoModule extends BaseModule {
         const overrideWords = GetDelimitedList(this.settings.overrideWords);
         if (overrideWords.length > 0 && !this.settings.enableCycle)
             return overrideWords;
+        // No trigger word at all (random off and none given) means there is nothing to trigger on, not that anything triggers.
         else
-            return [this.settings.trigger];
+            return this.settings.trigger ? [this.settings.trigger] : [];
     }
 
     get blockSpeechTriggers(): string[] {
@@ -628,9 +793,8 @@ export class HypnoModule extends BaseModule {
         if (msg.startsWith("(") || !triggers)
             return false;
 
-        const matched = triggers.some(trigger => {
-            return isPhraseInString(msg, trigger);
-        });        
+        // A blank trigger is no trigger: it must never match (an empty phrase is "found" in every message).
+        const matched = triggers.some(trigger => !!trigger?.trim() && isPhraseInString(msg, trigger));
 
         return (matched && 
             (awakener ? this.hypnoActivated : !this.hypnoActivated) &&
@@ -741,7 +905,7 @@ export class HypnoModule extends BaseModule {
         if (!AudioShouldSilenceSound(true))
             AudioPlaySoundEffect("BellMedium");
 
-        const bypassResistance = this.settings.alwaysSubmit || (this.settings.alwaysSubmitMemberIds.split(",").map(id => id.trim()).indexOf(sender.MemberNumber + "") > -1);
+        const bypassResistance = this.settings.alwaysSubmit || ((this.settings.alwaysSubmitMemberIds ?? "").split(",").map(id => id.trim()).indexOf(sender.MemberNumber + "") > -1);
         const totalInfluence = this.GetSuggestionInfluence(suggestion, sender);
         const playerDomRepMod = 0;//getDominance(Player) / 2;
         // Calculate chance to resist suggestion, if 0 force activate
@@ -790,6 +954,7 @@ export class HypnoModule extends BaseModule {
         const influence = this.GetSuggestionInfluence(suggestion, sender);
         if (roll > influence) {
             LSCG_SendLocal(`Successfully resisted the suggestion! [${roll}/${influence}]`);
+            this.EmitSuggestionResolved(suggestion, sender.MemberNumber ?? -1, true);
             this.ReduceSpeakerInfluence(sender.MemberNumber ?? -1);
             if (suggestion.installedBy != sender.MemberNumber)
                 this.ReduceSpeakerInfluence(suggestion.installedBy);
@@ -801,10 +966,16 @@ export class HypnoModule extends BaseModule {
     }
 
     ResistSuggestion(opts: SuggestionMiniGameOptions) {
+        this.EmitSuggestionResolved(opts.suggestion, opts.senderNum, true);
         this.ReduceSpeakerInfluence(opts.senderNum);
         if (opts.suggestion.installedBy != opts.senderNum)
             this.ReduceSpeakerInfluence(opts.suggestion.installedBy);
         settingsSave();
+    }
+
+    /** Tells extensions how a triggered suggestion ended up: the player resisted it, or submitted and its instructions are about to run. */
+    EmitSuggestionResolved(suggestion: HypnoSuggestion, sender: number, resisted: boolean) {
+        emit("hypno.suggestionResolved", { suggestion: suggestion.name, sender, installedBy: suggestion.installedBy, resisted });
     }
 
     DoSuggestion(opts: SuggestionMiniGameOptions) {
@@ -814,15 +985,27 @@ export class HypnoModule extends BaseModule {
         const suggestion = opts.suggestion;
         const sender = opts.sender;
 
+        this.EmitSuggestionResolved(suggestion, opts.senderNum, false);
+
         this.IncreaseSpeakerInfluence(sender.MemberNumber ?? -1);
         if (suggestion.installedBy != sender.MemberNumber)
             this.IncreaseSpeakerInfluence(suggestion.installedBy);
         
+        // Each instruction waits after the one before it: what the suggestion's writer chose, else the default. The first happens at once.
+        // Tracked until it has happened, so a safeword stops the ones still waiting.
+        let wait = 0;
         suggestion.instructions.forEach((instruction, ix, arr) => {
-            setTimeout(() => {
-                if (this.settings.blockedInstructions.indexOf(instruction.type) > -1) {
+            if (ix > 0) wait += cleanDelay(instruction.delay) ?? EFFECT_DURATIONS.SUGGESTION_INSTRUCTION_DELAY;
+            const timer = setTimeout(() => {
+                this.pendingInstructions.delete(timer);
+                if ((this.settings.blockedInstructions ?? []).indexOf(instruction.type) > -1) {
                     return this.BlockedInstruction(opts, instruction);
                 }
+                // Extensions may veto this one instruction; the rest of the suggestion carries on.
+                const info = { instruction: instruction.type as string, suggestion: suggestion.name, index: ix, sender: opts.senderNum, installedBy: suggestion.installedBy };
+                if (emitBefore("hypno.beforeInstruction", info).cancelled)
+                    return;
+                let performed = true;
                 switch (instruction.type) {
                     case LSCGHypnoInstruction.activity:
                         this.ForceActivity(opts, instruction);
@@ -885,12 +1068,49 @@ export class HypnoModule extends BaseModule {
                         });
                         break;
                     default:
+                        performed = this.PerformExtensionInstruction(opts, instruction);
                         break;
                 }
+                if (performed)
+                    emit("hypno.instructionPerformed", info);
                 settingsSave();
-            }, ix * EFFECT_DURATIONS.SUGGESTION_INSTRUCTION_DELAY);
+            }, wait);
+            this.pendingInstructions.add(timer);
         });
     }
+
+    /** Timers of suggestion instructions that are waiting their turn. */
+    pendingInstructions = new Set<ReturnType<typeof setTimeout>>();
+
+    /** Stops every suggestion instruction that hasn't happened yet, so nothing lands after a safeword. Returns how many were stopped. */
+    CancelPendingInstructions(): number {
+        const stopped = this.pendingInstructions.size;
+        this.pendingInstructions.forEach(timer => clearTimeout(timer));
+        this.pendingInstructions.clear();
+        return stopped;
+    }
+
+	/** An instruction an extension added. Its options are checked against what the extension declared before it sees them, whoever installed the
+	 *  suggestion; one whose extension isn't installed here just doesn't happen. */
+	PerformExtensionInstruction(opts: SuggestionMiniGameOptions, instruction: HypnoInstruction): boolean {
+		if (!isExtensionInstruction(instruction.type))
+			return false;
+		const def = extensionInstructions.get(instruction.type);
+		if (!def) {
+			LSCG_SendLocal(`Part of ${opts.senderName}'s suggestion has no effect here: its instruction isn't available.`);
+			return false;
+		}
+		def.perform({
+			instruction: def.id,
+			suggestion: opts.suggestion.name,
+			options: sanitizeOptions(def.options, instruction.arguments?.options),
+			sender: opts.senderNum,
+			installedBy: opts.suggestion.installedBy,
+			sendAction: text => SendAction(String(text), opts.sender),
+			states: builtInStates(this.StateModule, opts.senderNum),
+		});
+		return true;
+	}
 
 	//Show a button on screen to accept or reject money from sender
 	PromptResistSuggestion(suggestion: HypnoSuggestion, sender: Character, msg: string) {
@@ -1056,22 +1276,63 @@ export class HypnoModule extends BaseModule {
                 Speech: "false",
             };
             const hasItemPermission = ServerChatRoomGetAllowItem(Player, target);
-            const isAllowed = hasItemPermission && ActivityAllowedForGroup(target, activityGroup?.Name as AssetGroupItemName).filter(a => !a.Blocked).findIndex(a => a.Activity.Name == activity?.Name) > -1;
+            const allowedForGroup = hasItemPermission ? ActivityAllowedForGroup(target, activityGroup?.Name as AssetGroupItemName) : [];
+            const isAllowed = hasItemPermission && allowedForGroup.filter(a => !a.Blocked).findIndex(a => a.Activity.Name == activity?.Name) > -1;
             if (isAllowed) ActivityRun(Player, target, activityGroup as AssetItemGroup, <ItemActivity>{
                 Activity: activity,
                 Group: activityGroup.Name,
-                Item: InventoryGet(Player, "ItemHandheld"),
+                Item: allowedForGroup.find(a => a.Activity.Name == activity.Name && !a.Blocked)?.Item ?? InventoryGet(Player, "ItemHandheld"),
             }, true);
             else {
                 SendAction("%NAME% struggles to perform some action.");
                 LSCG_SendLocal(`Something beyond your control is preventing you from following your activity instruction... You shake a little bit of ${opts.senderName}'s influence.`);
+                this.ExplainActivityFailure(activity, activityGroup, target, hasItemPermission, allowedForGroup);
                 this.ReduceSpeakerInfluence(opts.sender.MemberNumber ?? -1);
             }
             this.StateModule.HypnoState.Restrictions = tmp;
         } else {
             LSCG_SendLocal(`You are unable to interpret your activity instruction and shake a little bit of ${opts.senderName}'s influence.`);
+            const missing = !target ? "no target could be found (check the instruction's target, or whether they are in the room)"
+                : !activityGroup ? `the zone '${activitySelection?.group || "none"}' is not set or does not exist`
+                : `the activity '${activitySelection?.name || "none"}' is not set or is not available on ${activityGroup.Name}`;
+            this.ReportActivityFailure(`Activity instruction could not run: ${missing}.`);
             this.ReduceSpeakerInfluence(opts.sender.MemberNumber ?? -1);
         }
+    }
+
+    /** Logs to the console why an activity instruction was refused. */
+    ReportActivityFailure(reason: string) {
+        console.log(`[LSCG Suggestion] ${reason}`);
+    }
+
+    /** Walks BC's own checks for an activity one at a time (the same ones ActivityAllowedForGroup applies) to name the one that fails. */
+    ExplainActivityFailure(activity: Activity, group: AssetGroup, target: Character, hasItemPermission: boolean, allowedForGroup: ItemActivity[]) {
+        const targetName = CharacterNickname(target);
+        const where = `${targetName}'s ${group.Name}`;
+        const groupName = group.Name as AssetGroupItemName;
+        const prerequisites = (activity.Prerequisite ?? []) as ActivityPrerequisite[];
+        let reason: string;
+        if (!hasItemPermission)
+            reason = `your item permissions do not allow ${targetName} to be touched by you`;
+        else if (InventoryIsBlockedByDistance(target))
+            reason = `${targetName} is out of reach`;
+        else if (!ActivityAllowed() || !CharacterHasArousalEnabled(target))
+            reason = `activities are disabled, or ${targetName} has arousal turned off`;
+        else if (!ActivityPossibleOnGroup(target, groupName))
+            reason = `${where} is not an enabled arousal zone, or one of you is enclosed`;
+        else if (!ActivityHasValidTarget(target, activity, group))
+            reason = `${activity.Name} is not a valid ${target.IsPlayer() ? "self" : "other"} activity for ${group.Name}`;
+        else if (prerequisites.some(p => !ActivityCheckPrerequisite(p, Player, target, group)))
+            reason = `unmet requirement ${prerequisites.filter(p => !ActivityCheckPrerequisite(p, Player, target, group)).join(", ")}`;
+        else if (!ActivityCheckPermissions(activity, Player, true) || !ActivityCheckPermissions(activity, target, false))
+            reason = `${!ActivityCheckPermissions(activity, Player, true) ? "your" : `${targetName}'s`} activity permissions do not allow ${activity.Name}`;
+        else {
+            const entries = allowedForGroup.filter(a => a.Activity.Name == activity.Name);
+            reason = entries.length
+                ? `${activity.Name} on ${where} is blocked (${entries.map(e => String(e.Blocked ?? "unknown")).join(", ")}) by the item that would perform it`
+                : `no item was found to perform ${activity.Name} on ${where}`;
+        }
+        this.ReportActivityFailure(`Activity instruction refused: ${reason}.`);
     }
 
     ForceStrip(opts: SuggestionMiniGameOptions, instruction: HypnoInstruction) {

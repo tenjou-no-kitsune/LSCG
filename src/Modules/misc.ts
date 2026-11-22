@@ -1,21 +1,25 @@
 import { BaseModule } from "base";
 import { MiscSettingsModel } from "Settings/Models/base";
 import { ModuleCategory } from "Settings/setting_definitions";
-import { getCharacter, GetItemNameAndDescriptionConcat, GetMetadata, getRandomInt, GetTargetCharacter, hookFunction, isPhraseInString, LSCG_SendLocal, OnAction, OnActivity, removeAllHooksByModule, SendAction, settingsSave, ICONS, GetCraftingNameAndDescriptionConcat } from "../utils";
-import { CureKeywords, getModule, HornyKeywords, MindControlKeywords, NetgunKeywords, SedativeKeywords } from "modules";
+import { getCharacter, GetItemNameAndDescriptionConcat, GetMetadata, getRandomInt, GetTargetCharacter, hookFunction, isPhraseInString, LSCG_SendLocal, OnAction, OnActivity, removeAllHooksByModule, SendAction, settingsSave, ICONS, GetCraftingNameAndDescriptionConcat, GetHandheldItemNameAndDescriptionConcat } from "../utils";
+import { BuiltInDrugKeywords, CureKeywords, getModule, HornyKeywords, MindControlKeywords, NetgunKeywords, SedativeKeywords } from "modules";
 import { extensionDrugs, type ExtensionDrug } from "api/drugs";
+import { BUILT_IN_DRUGS } from "./drugs/builtin";
 import { StateModule } from "./states";
 import { SleepState } from "./States/SleepState";
 import { LeashingModule } from "./leashing";
 import { chaoticKeywords, evolvingKeywords, quickKeywords, slowKeywords } from "./chaotic-item";
 import { ElectricKeywords, SelfTighteningKeywords, SubduingKeywords, TamperProofKeywords } from "./item-use";
 import { CursedItemModule, CursedKeywords } from "./cursed-item";
-import { AllowedNetGuns } from "./injector";
+import type { ActivityModule } from "./activities";
 import {
     CHLOROFORM_TIMING,
     CHECK_INTERVALS,
     RANDOM_EVENT_ODDS,
     LSCG_EFFECTS_MENU,
+    EFFECT_DURATIONS,
+    ACTIVITY_VALUES,
+    SOAKED_ITEMS,
 } from "../constants";
 import { SoulbindKeywords } from "./States/AstralProjectionState";
 
@@ -29,6 +33,12 @@ interface ScreenElem {
     keywords: string[],
     condition: () => boolean
 }
+
+export const AllowedNetGuns = [
+    "MedicalInjector",
+    "RainbowWand",
+    "Baguette",
+];
 
 export class MiscModule extends BaseModule {
     get settings(): MiscSettingsModel {
@@ -55,7 +65,31 @@ export class MiscModule extends BaseModule {
             handChokeEnabled: false,
             gagChokeEnabled: false,
             chokeChainEnabled: false,
+            netgunIsChaotic: false,
+            netgunKeywords: ["net gun", "netgun"],
+            stats: { successfulNettingsCount: 0, totalNettingsCount: 0 },
         };
+    }
+
+    init(): void {
+        super.init();
+        // The net gun was part of the drug enhancements: bring its settings and stats over, and keep it on wherever those were on
+        const s = this.settings;
+        if (s.netgunEnabled === undefined) {
+            const old = Player.LSCG.InjectorModule as Partial<Record<string, any>> | undefined;
+            s.netgunEnabled = !!old?.enabled;
+            s.netgunIsChaotic = !!old?.netgunIsChaotic;
+            s.stats.successfulNettingsCount = old?.stats?.successfulNettingsCount || 0;
+            s.stats.totalNettingsCount = old?.stats?.totalNettingsCount || 0;
+            delete old?.netgunIsChaotic;
+            delete old?.netgunKeywords;
+            delete old?.stats?.successfulNettingsCount;
+            delete old?.stats?.totalNettingsCount;
+        }
+    }
+
+    get netgunEnabled(): boolean {
+        return this.Enabled && !!this.settings.netgunEnabled;
     }
 
     safeword(): void {
@@ -63,6 +97,9 @@ export class MiscModule extends BaseModule {
     }
 
     load(): void {
+        // Override with the defaults. Remove from here if opened to user configuration later.
+        this.settings.netgunKeywords = this.defaultSettings.netgunKeywords;
+
         // Kneel on lap sit
         OnActivity(100, ModuleCategory.Misc, (data, sender, msg, metadata) => {
             const target = GetTargetCharacter(data);
@@ -280,6 +317,67 @@ export class MiscModule extends BaseModule {
 
     ActivateChloroEvent() {
         SendAction(this.chroloBlockStrings[getRandomInt(this.chroloBlockStrings.length)]);
+    }
+
+    run(): void {
+        const activityModule = getModule<ActivityModule>("ActivityModule");
+        if (!activityModule)
+            return;
+
+        // Netgun
+        activityModule.AddActivity({
+            Activity: {
+                Name: "NetGun",
+                MaxProgress: ACTIVITY_VALUES.NETGUN_MAX_PROGRESS,
+                MaxProgressSelf: ACTIVITY_VALUES.NETGUN_MAX_PROGRESS,
+                Prerequisite: ["UseHands"],
+            },
+            Targets: [
+                {
+                    Name: "ItemArms",
+                    SelfAllowed: true,
+                    TargetLabel: "Shoot Netgun",
+                    TargetAction: "SourceCharacter takes aim at TargetCharacter with PronounPossessive net gun.",
+                    TargetSelfAction: "SourceCharacter turns PronounPossessive net gun on PronounSelf.",
+                },
+            ],
+            CustomPrereqs: [
+                {
+                    Name: "HasNetgun",
+                    Func: (acting, acted, group) => {
+                        return this.netgunEnabled && this.HasNetgun(acting);
+                    },
+                }, {
+                    Name: "DevicesSlotIsFree",
+                    Func: (acting, acted, group) => {
+                        return !InventoryGet(acted, "ItemDevices");
+                    },
+                },
+            ],
+            CustomAction: {
+                Func: (target) => {
+                    if (target) {
+                        // if (target.MemberName != Player.MemberNumber) {
+                        // 	SendAction("%NAME% takes aim at %OPP_NAME% with %POSSESSIVE% net gun.", target);
+                        // 	setTimeout(() => this.ShootNetgun(target), 5000);
+                        // } else {
+                        // 	SendAction("%NAME% turns %POSSESSIVE% netgun on themselves!", target);
+                        // 	this.ShootNetgun(target)
+                        // }
+                        setTimeout(() => this.ShootNetgun(target), EFFECT_DURATIONS.ACTION_DELAY);
+                    }
+                },
+            },
+            CustomImage: "Assets/Female3DCG/ItemDevices/Preview/Net.png",
+        });
+
+        // A net gun is made from an injector, so it can't inject as well
+        activityModule.AddCustomPrereq({
+            Name: "InjectorIsNotNetgun",
+            Func: (acting, acted, group) => !this.HasNetgun(acting),
+        });
+        const injectActivity = ActivityFemale3DCG.find(act => act.Name == "Inject") as LSCGActivity;
+        injectActivity?.Prerequisite.push("InjectorIsNotNetgun");
     }
 
     unload(): void {
@@ -595,7 +693,7 @@ export class MiscModule extends BaseModule {
             id_label: this.LscgEffectCraftingId.cursedSelect,
             id_button: "",
             label: "",
-            description: "Selection for the curse to apply",
+            description: "The curse to apply, shown with its outfit. Curses and their outfits are set up in LSCG's Cursed Items settings",
             keywords: [],
             condition: (): boolean => {
                 return (document.getElementById(this.LscgEffectCraftingId.cursedButton) as HTMLInputElement)?.checked;
@@ -727,7 +825,47 @@ export class MiscModule extends BaseModule {
 
     /** The built-in drugs, then any extensions have registered, which can appear after this module is built. */
     get allDrugOptions(): ScreenElem[] {
-        return [...this.drugOptionsList, ...extensionDrugs.all().map(drug => this.extensionDrugOption(drug))];
+        return [...this.drugOptionsList, ...this.tableDrugOptions, ...extensionDrugs.all().map(drug => this.extensionDrugOption(drug)), ...this.soakedDrugOptions];
+    }
+
+    /** Crafting checkboxes for built-in drugs defined in the drug table that drugOptionsList (written before the table) doesn't list by hand. */
+    get tableDrugOptions(): ScreenElem[] {
+        const listed = ["sedative", "horny", "mindcontrol"];
+        const allowedItems = ["MedicalInjector", "LatexRespirator", "GlassFilled", "Mug"];
+        return BUILT_IN_DRUGS.filter(drug => !listed.includes(drug.id)).map(drug => ({
+            type: "checkbox",
+            id_label: `crafting-lscg-effects-${drug.id}-label`,
+            id_button: `crafting-lscg-effects-${drug.id}-checkbox`,
+            label: drug.label,
+            description: `Add ${drug.label.toLowerCase()} effect to the item (Only for: Medical Injector, Latex Respirator, Filled Glass or Mug)`,
+            keywords: BuiltInDrugKeywords(drug) ?? [drug.id],
+            condition: (): boolean => !!CraftingSelectedItem?.Asset && allowedItems.includes(CraftingSelectedItem.Asset.Name),
+        } as ScreenElem));
+    }
+
+    /** Crafted mouth, nose and face slots a "<drug>-soaked" item can sit in (see InjectorModule.soakedSlots). */
+    static readonly SoakableGroups: string[] = ["ItemMouth", "ItemMouth2", "ItemMouth3", "ItemNose", "ItemHood", "ItemHead"];
+
+    /** One "soaked" checkbox per drug, for items in the mouth, nose and face slots. They write "<keyword>-soaked", which the injector
+     *  reads to dose the wearer a little at a time. Extension drugs get one as soon as they register. */
+    get soakedDrugOptions(): ScreenElem[] {
+        const drugs: { id: string; label: string; keyword: string | undefined }[] = [
+            ...BUILT_IN_DRUGS.map(drug => ({ id: drug.id as string, label: drug.label, keyword: drug.soakKeywords[0] ?? BuiltInDrugKeywords(drug)?.[0] ?? drug.id })),
+            ...extensionDrugs.all().map(drug => ({ id: drug.id, label: drug.label, keyword: drug.soakKeywords[0] ?? drug.keywords[0] })),
+        ];
+        return drugs.filter(d => !!d.keyword).map(d => {
+            const safe = d.id.replace(/[^a-z0-9_]/gi, c => `-${c.charCodeAt(0).toString(16)}-`);
+            return {
+                type: "checkbox",
+                id_label: `crafting-lscg-effects-soaked-${safe}-label`,
+                id_button: `crafting-lscg-effects-soaked-${safe}-checkbox`,
+                label: `${d.label}-soaked`,
+                description: `Soak the item in ${d.label.toLowerCase()}, dosing the wearer gradually while worn (Only for: mouth, nose and face items)`,
+                // The first one is what ticking the box writes; all of them tick it.
+                keywords: SOAKED_ITEMS.KEYWORD_SUFFIXES.map(suffix => d.keyword + suffix),
+                condition: (): boolean => !!CraftingSelectedItem?.Asset && MiscModule.SoakableGroups.includes(CraftingSelectedItem.Asset.Group.Name),
+            } as ScreenElem;
+        });
     }
 
     extensionDrugOption(drug: ExtensionDrug): ScreenElem {
@@ -818,8 +956,8 @@ export class MiscModule extends BaseModule {
             parent.style.setProperty("display", "grid");
             parent.style.setProperty("grid-template", `
                 "${this.LscgEffectCraftingId.topBar} ${this.LscgEffectCraftingId.topBar}" var(--menu-button-size)
-                "${this.LscgEffectCraftingId.chaoticEvolvingGrid} ${this.LscgEffectCraftingId.miscGrid}" auto
-                "${this.LscgEffectCraftingId.tamperproofGrid} ${this.LscgEffectCraftingId.drugGrid}" auto
+                "${this.LscgEffectCraftingId.chaoticEvolvingGrid} ${this.LscgEffectCraftingId.miscGrid}" minmax(0, 1fr)
+                "${this.LscgEffectCraftingId.tamperproofGrid} ${this.LscgEffectCraftingId.drugGrid}" minmax(0, 1.5fr)
                 "${this.LscgEffectCraftingId.toolTip} ${this.LscgEffectCraftingId.toolTip}" var(--menu-button-size)
                 / 3fr 3fr`);
             parent.style.setProperty("gap", "calc(var(--menu-button-size) / 15)");
@@ -927,6 +1065,9 @@ export class MiscModule extends BaseModule {
                 "padding-right": "calc(var(--menu-button-size) / 12)",
                 "border": "1px dotted var(--lscg-border-color)",
                 "padding": "0.5rem",
+                // The menu is a fixed size and a cell can hold more rows than fit (the drugs plus their soaked variants): scroll, don't spill out.
+                "min-height": "0",
+                "overflow-y": "auto",
             },
             children: children,
         });
@@ -1042,9 +1183,9 @@ export class MiscModule extends BaseModule {
 			return;
 		}
 
-        // remove other
-        for (const curseName of curseNameList) {
-            if (curseName == selected) continue;
+        // remove other, longest first, leaving alone any that are part of the selected name ("Maid" in "Maid Uniform")
+        for (const curseName of [...curseNameList].sort((a, b) => b.length - a.length)) {
+            if (!curseName || curseName == selected || selected.includes(curseName)) continue;
 
             nameInput.value = nameInput.value.replaceAll(curseName, "");
             descriptionInput.value = descriptionInput.value.replaceAll(curseName, "");
@@ -1060,10 +1201,12 @@ export class MiscModule extends BaseModule {
         }
     }
 
-    // Populate the curse Select
+    // Populate the curse Select: the player's curses (from the Cursed Items settings), each showing the outfit it applies.
+    // The option values stay the bare curse names (and the empty word), which is what curseSelectChanged writes into the craft
     getSelectCurseOptions(): HTMLOptionsUnion[] {
         const optionList: HTMLOptionsUnion[] = [];
-        let curseNameList = getModule<CursedItemModule>("CursedItemModule")?.settings.CursedItems.map(item => item.Name);
+        const curses = getModule<CursedItemModule>("CursedItemModule")?.settings.CursedItems ?? [];
+        let curseNameList = curses.map(item => item.Name);
         if (!curseNameList || curseNameList.length <= 0) {
             curseNameList = [];
         }
@@ -1088,10 +1231,18 @@ export class MiscModule extends BaseModule {
         }
 
         for (const curse of curseNameList) {
-            const elem: HTMLOptionsUnion = {
-                tag: "option", children: [curse],
-            };
-            optionList.push(elem);
+            let label: string;
+            let title: string;
+            if (curse == this.cursedSelectEmptyWord) {
+                label = curses.length > 0 ? "No curse" : "No curses yet: add one under LSCG > Cursed Items";
+                title = "Curses, and the outfit each one applies, are set up in LSCG's Cursed Items settings";
+            } else {
+                const model = curses.find(c => c.Name == curse);
+                const outfit = model?.OutfitKey || "no outfit set";
+                label = `${curse} (${outfit})${model?.Enabled ? "" : " [disabled]"}`;
+                title = model?.Enabled ? `Applies the outfit "${outfit}"` : "This curse is disabled in the Cursed Items settings, so it won't apply";
+            }
+            optionList.push({ tag: "option", attributes: { value: curse, title }, children: [label] });
         }
 
         return optionList;
@@ -1228,5 +1379,106 @@ export class MiscModule extends BaseModule {
             return this.getSelectCurseOptions();
         }
         return [];
+    }
+
+    HasNetgun(C: Character | null): boolean {
+        if (!C)
+            return false;
+
+        const item = InventoryGet(C, "ItemHandheld");
+        if (!item || !item.Asset || AllowedNetGuns.indexOf(item.Asset.Name) == -1)
+            return false;
+
+        const totalString = GetHandheldItemNameAndDescriptionConcat(C);
+        if (!totalString)
+            return false;
+
+        const isNetgun = this.settings.netgunKeywords?.some(ph => isPhraseInString(totalString ?? "", ph, true));
+        return isNetgun;
+    }
+
+    ShootNetgun(target: Character) {
+        if (!target)
+            return;
+
+        if (this.settings.netgunIsChaotic) {
+            SendAction("%NAME% fires a net wildly.");
+            setTimeout(() => this.ResolveNetting(target, true), EFFECT_DURATIONS.NETGUN_RESOLVE_DELAY);
+        } else if (target.MemberNumber == Player.MemberNumber) {
+            SendAction("%NAME% fires at themselves point blank.", target);
+            setTimeout(() => this.ResolveNetting(target), EFFECT_DURATIONS.NETGUN_RESOLVE_DELAY);
+        }
+        else {
+            SendAction("%NAME% fires a net at %OPP_NAME%.", target);
+            setTimeout(() => this.ResolveNetting(target), EFFECT_DURATIONS.NETGUN_RESOLVE_DELAY);
+        }
+    }
+
+    ResolveNetting(intendedTarget: Character, chaotic: boolean = false) {
+        this.settings.stats.totalNettingsCount = (this.settings.stats.totalNettingsCount ?? 0) + 1;
+        let actualTarget = intendedTarget;
+        if (chaotic)
+            actualTarget = this.GetChaoticNetTarget(intendedTarget);
+        if (actualTarget.MemberNumber == intendedTarget.MemberNumber)
+            this.settings.stats.successfulNettingsCount = (this.settings.stats.successfulNettingsCount ?? 0) + 1;
+        this.ApplyNet(actualTarget);
+        settingsSave();
+    }
+
+    GetChaoticNetTarget(intendedTarget: Character) {
+        // 50/50 chance to hit intended target..
+        const val = getRandomInt(100);
+        if (val > RANDOM_EVENT_ODDS.CHAOTIC_NET_HIT_CHANCE)
+            return intendedTarget;
+        const filteredList = ChatRoomCharacterDrawlist.filter(c => !InventoryGet(c, "ItemDevices"));
+        if (filteredList.length <= 0)
+            return intendedTarget; // Also hit the intended target if they're the _only_ one who has no devices already equipped
+
+        return filteredList[getRandomInt(filteredList.length)];
+    }
+
+    GetCraftedNet(): CraftingItem | undefined {
+        const netgun = InventoryGet(Player, "ItemHandheld");
+        const netgunCraft = netgun?.Craft;
+        const netgunStr = GetHandheldItemNameAndDescriptionConcat() ?? "";
+        if (!netgunCraft || !netgunStr)
+            return;
+
+        let craftedNets: CraftingItem[] = Player.Crafting?.filter(x => !!x && x.Item == "Net").map(x => <CraftingItem>x) ?? [];
+
+        const craftingMember = netgunCraft.MemberNumber;
+        if (!!craftingMember && craftingMember >= 0 && craftingMember != Player.MemberNumber) {
+            const craftingChar = getCharacter(craftingMember);
+            if (craftingChar) {
+                craftedNets = craftedNets?.concat(craftingChar.Crafting?.filter((x): x is CraftingItem => x?.Item == "Net") ?? "");
+            }
+        }
+
+        const craftedNet = craftedNets?.filter(x => !!x)?.find(x => !!x && !!x.Name && isPhraseInString(netgunStr, x.Name));
+        return craftedNet;
+    }
+
+    ApplyNet(target: Character) {
+        let isDefaultNet = false;
+        let craftedNet = this.GetCraftedNet();
+
+        if (!craftedNet) {
+            isDefaultNet = true;
+            craftedNet = <CraftingItem>{
+                MemberNumber: Player.MemberNumber,
+                MemberName: CharacterNickname(Player),
+                Name: "Net Gun Net",
+                Description: "A lightweight net designed to be shot from a handheld launcher.",
+                Color: "Default",
+            };
+        }
+        const net = InventoryWear(target, "Net", "ItemDevices", null, isDefaultNet ? 0 : craftedNet.DifficultyFactor, Player.MemberNumber, craftedNet, false);
+        InventoryCraft(Player, target, "ItemDevices", craftedNet, true);
+        if (!!net && !!net.Property && isDefaultNet) {
+            net.Difficulty = ACTIVITY_VALUES.DEFAULT_NET_DIFFICULTY;
+            net.Property.Difficulty = ACTIVITY_VALUES.DEFAULT_NET_DIFFICULTY;
+        }
+        ChatRoomCharacterUpdate(target);
+        SendAction(`%NAME%'s ${isDefaultNet ? "net" : craftedNet.Name} engulfs %OPP_NAME%.`, target);
     }
 }

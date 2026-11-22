@@ -3,7 +3,7 @@ import { getModule, modules } from "modules";
 import { BaseSettingsModel, GlobalSettingsModel } from "Settings/Models/base";
 import { IPublicSettingsModel, PublicSettingsModel, SettingsModel } from "Settings/Models/settings";
 import { ModuleCategory } from "Settings/setting_definitions";
-import { removeAllHooksByModule, hookFunction, getCharacter, drawSvg, SVG_ICONS, sendLSCGMessage, settingsSave, LSCG_CHANGES, LSCG_SendLocal, mouseTooltip } from "../utils";
+import { removeAllHooksByModule, hookFunction, getCharacter, drawSvg, SVG_ICONS, sendLSCGMessage, settingsSave, LSCG_CHANGES, LSCG_SendLocal, mouseTooltip, IsBlockedSender, isAllowedMember } from "../utils";
 import { HypnoModule } from "./hypno";
 import { CollarModule } from "./collar";
 
@@ -16,6 +16,7 @@ import { StateModule } from "./states";
 import { GrabType, LeashingModule } from "./leashing";
 import { OpacityMigrator } from "./Migrators/OpacityMigrator";
 import { SuggestionSettingMigrator } from "./Migrators/SuggestionSettingMigrator";
+import { RemoteLevelMigrator } from "./Migrators/RemoteLevelMigrator";
 import { OutfitMigrator } from "./Migrators/OutfitMigrator";
 import { CursedItemMigrator } from "./Migrators/CursedItemMigrator";
 import { emit } from "api/events";
@@ -23,6 +24,7 @@ import { advertisedEffectIds } from "./Magic/spellEffects";
 import type { InjectorModule } from "./injector";
 import { publishedExtensionData } from "api/publish";
 import { dispatchExtensionCommand } from "api/network";
+import { DEFAULT_REMOTE_LEVEL, canRemoteCollar, canRemoteHypno, canRemoteMagic, remoteCollarChanges, remoteHypnoChanges, remoteMagicChanges } from "./remoteAccess";
 
 /** State extension keys holding compressed outfit snapshots (cursed outfits, redress slots, polymorph/redress originals). */
 const PRIVATE_STATE_EXTENSIONS = ["outfits", "slot-snapshot", "stored", "stored-outfit", "spell-effects"];
@@ -99,16 +101,65 @@ export class CoreModule extends BaseModule {
             sharePublicCrafting: false,
             showCheckRolls: true,
             blockDOGS: false,
+            outfitCopy: "Public",
+            remoteLevel: DEFAULT_REMOTE_LEVEL,
+            remoteMemberIds: "",
         };
 	}
 
     load(): void {
+        // R134 calls a minigame's return as a function, where R133 took the name of one. LSCG's sleepy/brainwash/suggestion
+        // games still pass names, so on R134 the game called a string when it ended. Turn a name into its function there.
+        const resolveMiniGameReturn = (name: unknown) => {
+            if (typeof name !== "string") return name;
+            const target = (window as any)[name.trim().replace(/\(\)$/, "")];
+            return typeof target === "function" ? () => target() : name;
+        };
+        const isR134Plus = () => parseInt(/R(\d+)/.exec(String((window as any).GameVersion ?? ""))?.[1] ?? "0") >= 134;
+        // ModSDK throws for a function that doesn't exist, so only hook what this BC build actually has.
+        const has = (name: string) => typeof (globalThis as any)[name] === "function";
+        // Only MiniGameEnd is hooked (not MiniGameStart, which tests and other mods spy on): the name BC stored is converted when the game ends.
+        if (has("MiniGameEnd")) {
+            hookFunction("MiniGameEnd", 1, (args, next) => {
+                if (isR134Plus()) (window as any).MiniGameReturnFunction = resolveMiniGameReturn((window as any).MiniGameReturnFunction);
+                return next(args);
+            }, ModuleCategory.Core);
+        }
+
+        // R134 only bundles item properties from its own allowlist and drops names it has no rules for when validating. Layer
+        // translation, scale, rotation and opacity are BC's own now (the opacity UI already uses them), so only LSCGLeadLined, a real
+        // LSCG setting, needs putting back on save. The legacy LayerOverrides (BC allowlists it for save already) is only kept
+        // through validation so old data survives until the opacity UI migrates it to LayerTranslationX/Y.
+        // Anything the game already kept is left alone, so this does nothing on R133 or once BC keeps them.
+        if (has("ItemPropertiesCompress")) {
+            hookFunction("ItemPropertiesCompress", 1, (args, next) => {
+                const out = next(args) as Record<string, unknown> | undefined;
+                const source = (args[0] as Item | undefined)?.Property as Record<string, unknown> | undefined;
+                if (source?.LSCGLeadLined === undefined || (out && "LSCGLeadLined" in out)) return out as ReturnType<typeof ItemPropertiesCompress>;
+                return { ...out, LSCGLeadLined: source.LSCGLeadLined } as ReturnType<typeof ItemPropertiesCompress>;
+            }, ModuleCategory.Core);
+        }
+        if (has("ItemPropertiesValidate")) {
+            hookFunction("ItemPropertiesValidate", 1, (args, next) => {
+                const res = next(args);
+                const input = args[0] as Record<string, unknown> | undefined;
+                const value = (res as any)?.value as Record<string, unknown> | undefined;
+                if (!value || !input || typeof input !== "object" || Array.isArray(input)) return res;
+                for (const key of ["LSCGLeadLined", "LayerOverrides"]) {
+                    if (input[key] !== undefined && !(key in value)) value[key] = input[key];
+                }
+                return res;
+            }, ModuleCategory.Core);
+        }
+
         hookFunction("ChatRoomSync", 1, (args, next) => {
             this.SendPublicPacket(true);
             return next(args);
         }, ModuleCategory.Core);
 
         hookFunction("ChatRoomMessage", 1, (args, next) => {
+            if (IsBlockedSender(args[0].Sender) && args[0].Content == "LSCGMsg")
+                return next(args);
             this.CheckForPublicPacket(args[0]);
             return next(args);
         }, ModuleCategory.Core);
@@ -118,7 +169,7 @@ export class CoreModule extends BaseModule {
             // Intercept LSCG beeps directly
             const msg = data.Message as unknown as LSCGMessageModel;
             if (data.BeepType === "Leash" && msg && msg.IsLSCG === true) {
-                if (msg.type == "command")
+                if (msg.type == "command" && !IsBlockedSender(data.MemberNumber))
                     this.Command(data.MemberNumber, msg);
             }
             else
@@ -252,6 +303,7 @@ export class CoreModule extends BaseModule {
         new SuggestionSettingMigrator(),
         new OutfitMigrator(),
         new CursedItemMigrator(),
+        new RemoteLevelMigrator(),
     ];
 
     CheckForMigrations(fromVersion: string): boolean {
@@ -331,14 +383,48 @@ export class CoreModule extends BaseModule {
         }
     }
 
+    // Commands that act on the Player. A hand-built packet can claim any of them, so each is held to the
+    // same item permissions as the real interaction would have been.
+    static readonly InteractionCommands: LSCGCommandName[] = [
+        "grab", "collar-tighten", "collar-loosen", "collar-stats", "photo", "spell", "pair", "spell-teach",
+        "swap-ask", "set-suggestions", "splat",
+    ];
+
+    // Broadcasts carry no target, so only the commands that are genuinely room-wide may arrive that way.
+    static readonly BroadcastCommands: LSCGCommandName[] = ["craft-share", "h5-execute"];
+
+    // The vanilla activity a grab type comes from, so the Player's own BC activity preferences apply to it.
+    static readonly GrabActivities: Partial<Record<string, string>> = {
+        ear: "Pinch", arm: "Grope", neck: "Choke", collar: "CollarGrab",
+        hair: "Pull", nose: "Pull", nipples: "Pull", mouth: "HandGag", eyes: "HandGag",
+    };
+
+    InteractionPermitted(senderNumber: number, msg: LSCGMessageModel): boolean {
+        const name = msg.command?.name;
+        if (!name || !CoreModule.InteractionCommands.includes(name))
+            return true;
+        if (!isAllowedMember(getCharacter(senderNumber) ?? undefined))
+            return false;
+        if (name == "grab" && Player.ArousalSettings?.Activity) {
+            const activity = CoreModule.GrabActivities[msg.command?.args?.find(a => a.name == "type")?.value as string];
+            if (activity && PreferenceGetActivityFactor(Player, activity as ActivityName, true) == 0)
+                return false;
+        }
+        return true;
+    }
+
     Command(senderNumber: number, msg: LSCGMessageModel) {
         if (!msg.command || msg.target != Player.MemberNumber)
             return;
         const Sender = getCharacter(senderNumber) as OtherCharacter;
+        if (!this.InteractionPermitted(senderNumber, msg)) {
+            // The grabber's side already holds us: a silent drop would leave them holding nothing
+            if (msg.command.name == "grab" && !!Sender?.MemberNumber)
+                getModule<LeashingModule>("LeashingModule")?.RefuseGrab(Sender, msg.command.args.find(a => a.name == "type")?.value as GrabType);
+            return;
+        }
+        // Every command here comes from another player, who could send anything: each handler checks the sender may do it
         switch (msg.command!.name) {
-            case "debug":
-                LSCG_SendLocal(msg.command.args[0].value as string);
-                break;
             case "grab":
                 getModule<LeashingModule>("LeashingModule")?.IncomingGrab(Sender, msg.command.args.find(a => a.name == "type")?.value as GrabType);
                 break;
@@ -349,21 +435,7 @@ export class CoreModule extends BaseModule {
                 getModule<LeashingModule>("LeashingModule")?.IncomingEscape(Sender, msg.target);
                 break;
             case "remote":
-                const prevCollarPurchase = Player.LSCG?.CollarModule?.collarPurchased;
-                if (Player.LSCG.HypnoModule.enabled && Player.LSCG.HypnoModule.remoteAccess) {
-                    Object.assign(Player.LSCG.HypnoModule, msg.settings?.HypnoModule);
-                    getModule<HypnoModule>("HypnoModule")?.initializeTriggerWord();
-                }
-                if ((!!Sender.MemberNumber && Player.IsOwnedByMemberNumber(Sender.MemberNumber)) || (Player.LSCG.CollarModule.enabled && Player.LSCG.CollarModule.remoteAccess))
-                    Object.assign(Player.LSCG.CollarModule, msg.settings?.CollarModule);
-                if (Player.LSCG.MagicModule.enabled && Player.LSCG.MagicModule.remoteAccess)
-                    Object.assign(Player.LSCG.MagicModule, msg.settings?.MagicModule);
-                settingsSave(true);
-                const currentCollarPurchase = Player.LSCG?.CollarModule?.collarPurchased;
-                if (!prevCollarPurchase && currentCollarPurchase)
-                    LSCG_SendLocal(`${!Sender ? "Someone" : CharacterNickname(Sender)} has purchased the Collar Module for you!`);
-                else
-                    LSCG_SendLocal(`${!Sender ? "Someone" : CharacterNickname(Sender)} has accessed your remote settings!`);
+                if (Sender) this.IncomingRemote(Sender, msg);
                 break;
             case "collar-tighten":
                 if (Sender) getModule<CollarModule>("CollarModule")?.TightenButtonPress(Sender);
@@ -375,7 +447,7 @@ export class CoreModule extends BaseModule {
                 if (Sender) getModule<CollarModule>("CollarModule")?.StatsButtonPress(Sender);
                 break;
             case "photo":
-                DrawFlashScreen("#FFFFFF", 500, 1500);
+                if (Sender) DrawFlashScreen("#FFFFFF", 500, 1500);
                 break;
             case "spell":
             case "pair":
@@ -402,8 +474,28 @@ export class CoreModule extends BaseModule {
         emit("command.received", { sender: senderNumber, name: msg.command.name });
     }
 
+    /** Settings sent from the remote screens: each module only from someone those screens would let in, and only the
+     *  settings they show. */
+    IncomingRemote(Sender: OtherCharacter, msg: LSCGMessageModel) {
+        const apply = (allowed: boolean, target: object, changes: () => Record<string, unknown>) => {
+            if (!allowed) return false;
+            const changed = changes();
+            Object.assign(target, changed);
+            return Object.keys(changed).length > 0;
+        };
+        const hypnoChanged = apply(canRemoteHypno(Player, Sender), Player.LSCG.HypnoModule, () => remoteHypnoChanges(Player, Sender, msg.settings?.HypnoModule));
+        if (hypnoChanged)
+            getModule<HypnoModule>("HypnoModule")?.initializeTriggerWord();
+        const collarChanged = apply(canRemoteCollar(Player, Sender), Player.LSCG.CollarModule, () => remoteCollarChanges(Player, msg.settings?.CollarModule));
+        const magicChanged = apply(canRemoteMagic(Player, Sender), Player.LSCG.MagicModule, () => remoteMagicChanges(Player, msg.settings?.MagicModule));
+        if (!hypnoChanged && !collarChanged && !magicChanged)
+            return;
+        settingsSave(true);
+        LSCG_SendLocal(`${CharacterNickname(Sender)} has accessed your remote settings!`);
+    }
+
     Broadcast(senderNumber: number, msg: LSCGMessageModel) {
-        if (!msg.command)
+        if (!msg.command || !CoreModule.BroadcastCommands.includes(msg.command.name))
             return;
         this.CommandListeners.filter(com => com.command == msg.command!.name).forEach(command => command.func(senderNumber, msg));
     }

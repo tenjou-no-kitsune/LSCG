@@ -1,4 +1,6 @@
+import type { RemoteAccessLevel } from "utils";
 import { HypnoSuggestion } from "Modules/hypno";
+import { extensionInstructions } from "api/hypno";
 import { BaseSettingsModel, ModuleStats } from "./base";
 
 export const SUGGESTION_LIMIT: number = 100;
@@ -34,6 +36,16 @@ export interface HypnoSettingsModel extends HypnoPublicSettingsModel {
     hypnoEyeType: number | undefined;
     enableArousal: boolean;
     enableSpirals: boolean;
+    /** Draw a slowly turning purple spiral over the screen while hypnotized. */
+    enableSpiralOverlay: boolean;
+    /** Seconds for the spiral overlay to make one full turn. */
+    spiralTurnSeconds: number;
+    /** Play binaural beats while hypnotized (headphones needed). Off unless the player turns it on. */
+    enableBinaural: boolean;
+    /** How loud the beats get, in percent. The ceiling for anything an extension asks for. */
+    binauralVolume: number;
+    /** Which beat plan to play (a key of BINAURAL_BEATS.PRESETS). */
+    binauralPreset: string;
     enableSnapWakeup: boolean;
     stats: HypnoModuleStats;
     triggerCycled: boolean;
@@ -52,6 +64,12 @@ export interface HypnoPublicSettingsModel extends BaseSettingsModel {
     overrideWords: string;
     overrideMemberIds: string;
     remoteAccess: boolean;
+    /** Who may get in: the owner always, and otherwise anyone within this level (see utils REMOTE_ACCESS_LEVELS). */
+    remoteLevel: RemoteAccessLevel;
+    /** Take who may get in, and when, from the General > Remote Access defaults instead of this section's own settings. */
+    useGlobalRemote: boolean;
+    /** Members let in whatever the level says (member numbers, comma separated). */
+    remoteMemberIds: string;
     remoteAccessRequiredTrance: boolean;
     limitRemoteAccessToHypnotizer: boolean;
     allowRemoteModificationOfMemberOverride: boolean;
@@ -65,12 +83,13 @@ export interface HypnoPublicSettingsModel extends BaseSettingsModel {
     limitSuggestionMod: boolean;
     suggestionRequireHypnotizer: boolean;
     allowSuggestionRemoval: boolean;
-    blockedInstructions: LSCGHypnoInstruction[];
+    /** Instruction types the player refuses: LSCG's own (by name) and extensions' (by namespaced id). */
+    blockedInstructions: string[];
     alwaysSubmit: boolean;
     alwaysSubmitMemberIds: string;
 }
 
-export function InstructionDescription(instruction: LSCGHypnoInstruction): string {
+export function InstructionDescription(instruction: string): string {
     switch (instruction) {
         case LSCGHypnoInstruction.activity:
             return "Compel the subject to perform an activity.";
@@ -95,6 +114,7 @@ export function InstructionDescription(instruction: LSCGHypnoInstruction): strin
         case LSCGHypnoInstruction.none:
             return "None";
         default:
-            return "";
+            // An extension's instruction describes itself.
+            return extensionInstructions.get(instruction)?.description ?? "";
     }
 }

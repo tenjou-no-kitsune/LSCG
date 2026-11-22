@@ -1,27 +1,28 @@
 import { h } from "tsx-dom";
-import { Chip, CheckboxRow, KitContext, KitTab, NumberRow, RuleTable, SectionLabel } from "Dom/kit";
-import { COOLDOWNS } from "constants/timing";
+import { Chip, CheckboxRow, Expando, Icon, KitContext, KitTab, NumberRow, RuleTable, SectionLabel } from "Dom/kit";
+import { BUILT_IN_DRUGS } from "Modules/drugs/builtin";
 import { extensionDrugs, type ExtensionDrug } from "api/drugs";
+import { optionRows } from "./optionRows";
+import { summarizeOptions } from "api/options";
 import type { InjectorModule } from "Modules/injector";
 import type { InjectorSettingsModel } from "./Models/injector";
 import type { MiscSettingsModel } from "./Models/base";
+import { BREATH_STRENGTH_PERCENT } from "constants/game-balance";
+import { SOAKED_ITEMS } from "constants/timing";
 
 const MAX_SIPS = 1000;
 const MAX_DECAY_MINUTES = 240;
-const DEFAULT_DECAY_MINUTES = {
-    sedative: COOLDOWNS.SEDATIVE / 60_000,
-    mindcontrol: COOLDOWNS.MIND_CONTROL / 60_000,
-    horny: COOLDOWNS.AROUSAL / 60_000,
-};
 
 /** What a crafted item needs to say to be this drug, as chips so long keyword lists stay readable. */
 function keywordChips(drug: ExtensionDrug): HTMLElement {
     return <div class="lscg-kit-chips">{drug.keywords.map(k => Chip(`"${k}"`, { tone: "muted" }))}</div> as HTMLElement;
 }
 
-function drugNameCell(drug: ExtensionDrug): HTMLElement {
+/** A drug's name, marked the way the spell effects and suggestion instructions tables mark an extension's: the extension icon before the
+ *  name and a chip naming the extension. */
+export function drugNameCell(drug: ExtensionDrug): HTMLElement {
     return <div class="lscg-kit-chips">
-        <b>{drug.label}</b>
+        <span>{Icon("extension", "Added by an extension")}{drug.label}</span>
         {Chip(drug.source, { tone: "info", tooltip: "Added by an extension." })}
         {drug.description ? <small class="lscg-kit-desc">{drug.description}</small> : null}
     </div> as HTMLElement;
@@ -45,14 +46,27 @@ function extensionDrugTable(ctx: KitContext, injector: InjectorModule | undefine
     });
 }
 
-/** The Drug Enhancements settings: general options, the drugs (LSCG's own and extensions'), and gases/chloroform. */
+/** The settings each extension drug declared, one closed section per drug under the table. */
+function extensionDrugOptions(ctx: KitContext, injector: InjectorModule | undefined): HTMLElement[] {
+    if (!injector)
+        return [];
+    return extensionDrugs.all().filter(drug => drug.options.length > 0).map(drug => {
+        const current = () => injector.EditableExtensionOptions(drug.id);
+        return Expando(ctx, {
+            summary: () => `${drug.label} settings: ${summarizeOptions(drug.options, current())}`,
+            content: optionRows(ctx, drug.options, current, patch => injector.SetExtensionOptions(drug.id, patch)),
+        });
+    });
+}
+
+/** The Drug Enhancements settings: general options, LSCG's own drugs, the drugs extensions add, and gases/chloroform. */
 export function buildInjectorTabs(ctx: KitContext, s: InjectorSettingsModel, misc: MiscSettingsModel, injector: InjectorModule | undefined): KitTab[] {
     return [
         {
             label: "General",
             render: () => [
                 CheckboxRow(ctx, {
-                    label: "Enabled", description: "Enable Enhanced Drinks, Injectors and Net Gun.",
+                    label: "Enabled", description: "Enable Enhanced Drinks and Injectors.",
                     get: () => s.enabled ?? false, set: v => s.enabled = v,
                 }),
                 NumberRow(ctx, {
@@ -64,12 +78,16 @@ export function buildInjectorTabs(ctx: KitContext, s: InjectorSettingsModel, mis
                     get: () => s.showDrugLevels ?? true, set: v => s.showDrugLevels = v,
                 }),
                 CheckboxRow(ctx, {
-                    label: "Heartbeat sound", description: "An occasional heartbeat sound while under the influence of aphrodisiac.",
-                    get: () => s.heartbeat ?? true, set: v => s.heartbeat = v,
+                    label: "Drug visuals", description: "Master switch for the drugs' visual effects: the suggestible's sway, tint and blur, and the hypno spiral. (The spiral also has its own switch in Hypnosis settings.)",
+                    get: () => s.enableDrugVisuals ?? true, set: v => s.enableDrugVisuals = v,
                 }),
                 CheckboxRow(ctx, {
-                    label: "Chaotic net gun", description: "Your net gun fires wildly and has a 50/50 chance to net a random character instead of your target.",
-                    get: () => s.netgunIsChaotic ?? true, set: v => s.netgunIsChaotic = v,
+                    label: "Swaying screen", description: "The warped, swaying screen while suggestible. Turn it off to keep just the green tint and blur. (Needs Drug visuals.)",
+                    get: () => s.enableSuggestibleWave ?? true, set: v => s.enableSuggestibleWave = v, disabled: () => s.enableDrugVisuals === false,
+                }),
+                CheckboxRow(ctx, {
+                    label: "Heartbeat sound", description: "An occasional heartbeat sound while under the influence of aphrodisiac.",
+                    get: () => s.heartbeat ?? true, set: v => s.heartbeat = v,
                 }),
             ],
         },
@@ -77,29 +95,29 @@ export function buildInjectorTabs(ctx: KitContext, s: InjectorSettingsModel, mis
             label: "Drugs",
             render: () => [
                 SectionLabel("LSCG's drugs", "Each activates for any injector or drink with one of its keywords in its crafted name or description."),
-                CheckboxRow(ctx, {
-                    label: "Sedative", description: "Activates for \"sedative\" or \"tranquilizer\".",
-                    get: () => s.enableSedative ?? false, set: v => s.enableSedative = v,
-                }),
-                CheckboxRow(ctx, {
-                    label: "Brainwash drug", description: "Activates for \"mind control,\" \"hypnotizing,\" or \"brainwashing\".",
-                    get: () => s.enableMindControl ?? false, set: v => s.enableMindControl = v,
-                }),
-                CheckboxRow(ctx, {
-                    label: "Aphrodisiac", description: "Activates for \"horny\" or \"aphrodisiac\".",
-                    get: () => s.enableHorny ?? false, set: v => s.enableHorny = v,
-                }),
+                ...BUILT_IN_DRUGS.map(drug => CheckboxRow(ctx, {
+                    label: drug.label, description: drug.activatesFor,
+                    get: () => s[drug.enableKey] ?? false, set: v => s[drug.enableKey] = v,
+                })),
                 SectionLabel("How fast they wear off", "Minutes for one dose to wear off while you're online. Leave at 0 for LSCG's default."),
-                ...(["sedative", "mindcontrol", "horny"] as const).map(type => NumberRow(ctx, {
-                    label: { sedative: "Sedative", mindcontrol: "Brainwash drug", horny: "Aphrodisiac" }[type],
-                    description: `Default: ${DEFAULT_DECAY_MINUTES[type]} minutes per dose.`,
+                ...BUILT_IN_DRUGS.map(drug => NumberRow(ctx, {
+                    label: drug.label,
+                    description: `Default: ${drug.defaultCooldown / 60_000} minutes per dose.`,
                     min: 0, max: MAX_DECAY_MINUTES, step: 0.5,
-                    get: () => injector?.GetDecayOverride(type) ?? 0,
-                    set: v => injector?.SetDecayOverride(type, v),
+                    get: () => injector?.GetDecayOverride(drug.id) ?? 0,
+                    set: v => injector?.SetDecayOverride(drug.id, v),
                     disabled: () => !injector,
                 })),
+            ],
+        },
+        {
+            label: "Extension drugs",
+            // Only there when an installed extension adds a drug.
+            hidden: extensionDrugs.all().length === 0,
+            render: () => [
                 SectionLabel("Extension drugs", "Drugs added by extensions. Each one only affects you once you enable it."),
-                extensionDrugs.all().length > 0 ? extensionDrugTable(ctx, injector) : <p class="lscg-kit-notice">No installed extension adds a drug.</p> as HTMLElement,
+                extensionDrugTable(ctx, injector),
+                ...extensionDrugOptions(ctx, injector),
             ],
         },
         {
@@ -113,6 +131,38 @@ export function buildInjectorTabs(ctx: KitContext, s: InjectorSettingsModel, mis
                 CheckboxRow(ctx, {
                     label: "Inexhaustible gases", description: "Any continuous delivery (e.g. a respirator) on you never runs out of gas.",
                     get: () => s.continuousDeliveryForever ?? false, set: v => s.continuousDeliveryForever = v,
+                }),
+                SectionLabel("Soaked items", "Crafted gags and masks with a drug word followed by \"-soaked\" or \"-laced\" (e.g. \"aphrodisiac-soaked\", \"intoxicant-laced\") dose you gradually while worn."),
+                CheckboxRow(ctx, {
+                    label: "Gas and soak emotes", description: "Occasional emotes as you breathe in a drug from a gas or a soaked item (rate-limited below). The doses still land without them.",
+                    get: () => s.enableDrugEmotes ?? true, set: v => s.enableDrugEmotes = v,
+                }),
+                CheckboxRow(ctx, {
+                    label: "Emotes only to me", description: "Show those emotes only to you instead of saying them to the room.",
+                    get: () => s.drugEmotesLocal ?? false, set: v => s.drugEmotesLocal = v, disabled: () => s.enableDrugEmotes === false,
+                }),
+                NumberRow(ctx, {
+                    label: "Minutes between emotes", description: "The least time between those emotes. 0 for no limit.",
+                    min: 0, max: 30, step: 0.5,
+                    get: () => s.drugEmoteMinutes ?? 4, set: v => s.drugEmoteMinutes = v, disabled: () => s.enableDrugEmotes === false,
+                }),
+                NumberRow(ctx, {
+                    label: "Gas strength (%)", description: "How strong each breath from a gas is. 100 is standard.",
+                    min: BREATH_STRENGTH_PERCENT.MIN, max: BREATH_STRENGTH_PERCENT.MAX, step: BREATH_STRENGTH_PERCENT.STEP,
+                    get: () => s.gasStrength ?? BREATH_STRENGTH_PERCENT.GAS_DEFAULT, set: v => s.gasStrength = v,
+                }),
+                NumberRow(ctx, {
+                    label: "Soak strength (%)", description: "How strong each breath from a soaked item is, as a percent of a standard gas. Default 30.",
+                    min: BREATH_STRENGTH_PERCENT.MIN, max: BREATH_STRENGTH_PERCENT.MAX, step: BREATH_STRENGTH_PERCENT.STEP,
+                    get: () => s.soakedStrength ?? Math.round(SOAKED_ITEMS.DOSE_FACTOR * 100), set: v => s.soakedStrength = v,
+                }),
+                CheckboxRow(ctx, {
+                    label: "Allow soaked items", description: "Allows crafted mouth, nose and face items soaked in a drug to dose you gradually.",
+                    get: () => s.enableSoakedItems ?? true, set: v => s.enableSoakedItems = v,
+                }),
+                CheckboxRow(ctx, {
+                    label: "Soaks never dry", description: "Soaked items on you stay potent for as long as they are worn; otherwise they dry out after an hour.",
+                    get: () => s.infiniteSoakPotency ?? false, set: v => s.infiniteSoakPotency = v,
                 }),
                 SectionLabel("Chloroform"),
                 CheckboxRow(ctx, {

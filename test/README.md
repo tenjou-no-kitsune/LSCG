@@ -8,6 +8,13 @@ Two Vitest projects:
   downloads and caches them (`npm run fetch-bc` to do that ahead of time).
 - `npm run test:all` runs both.
 
+## Coverage
+
+`npm run coverage` (unit only) and `npm run coverage:all` (both projects, what CI runs on pull requests) write a
+report to `coverage/` (open `coverage/index.html` for the per-line view). Both fail if coverage drops below the
+`thresholds` in `vitest.config.ts`. Those are a floor set just under what the unit project alone reaches, so raise
+them when a change adds coverage.
+
 ## Layout
 
 - `test/setup/globals.ts` — Vitest `setupFiles` entry for the `unit` project. Runs
@@ -62,6 +69,18 @@ values need an explicit sync step onto Node's own `globalThis`).
   `bc-stubs` in the same change; `.github/workflows/bc-bump.yml` does this
   automatically on a weekly schedule (or on demand).
 
+### Where CI gets the BC client
+
+gitgud.io (where BC lives) sits behind a Cloudflare challenge that only a real browser passes, so CI can't download the
+client from it. Instead the pinned files are packed once and attached to this repo's `bc-client` release; `validate.yml`
+unpacks them into `.cache/` (`npm run bc:fetch`), where `scripts/bc-client.mjs` finds them already present.
+
+When `test/bc-client.json` moves to a new BC commit (the weekly bump workflow can't download either), in a browser-reachable
+checkout: get the new files into `.cache/bc-<version>-<sha7>/` (for example by running `npm run fetch-bc` where gitgud
+answers, or copying a complete folder), then `npm run bc:pack` and upload the archive it prints the command for
+(`gh release upload bc-client <archive> --clobber`). Until that archive exists CI falls back to the (blocked) download.
+The playground's much larger `.cache/bc-full-*` cache for the UI job is not packed this way; that job is non-blocking.
+
 ## The playground (real browser)
 
 Neither project above draws anything: jsdom has no canvas or layout. For UI work, `npm run playground` serves a
@@ -114,6 +133,29 @@ agent-browser screenshot shot.png
    the same BC globals without ever removing the old ones. A module with its own
    ephemeral cross-test state (e.g. `ConsentModule.sentOffers`) should be reset
    explicitly in `beforeEach` — see `consent.test.ts`.
+
+## Map and lighting performance tools
+
+These are opt-in measurements and comparisons, not part of `npm test`. They drive the real client in the BC playground, so build
+first (`npm run build`). Results and what they showed are in `docs/perf-baseline.md`; the reasoning is in
+`docs/map-performance-plan.md`.
+
+- `npm run bench`: timings of the lighting math in Node (`test/bench/`). Writes `test/.out/bench-lighting.json`.
+- `npm run perf:map`: a 40x40 map room in the browser with the player walking, frame timings read from `window.lscgPerf`
+  (`test/ui/map-perf.spec.ts`). `-- --software` forces a software canvas; `-- --grep <name>` picks scenarios. Writes
+  `test/.out/map-perf-*.json` and a picture of the last frame.
+- `npm run parity:map`: renders fixed map states and compares the canvas with an earlier run, to prove a change did not alter
+  the picture (`test/ui/map-parity.spec.ts`). Run it with `MAP_PARITY=ref` on the code to compare against (a checkout of an earlier
+  commit, built), then `MAP_PARITY=new MAP_PARITY_REFERENCE=<that run's test/.out/parity/ref>` on the changed code.
+  `MAP_PARITY_FAST=1` runs the scenarios with the opt-in faster map drawing on.
+- `test/ui/map-room.ts` builds the map room both use. It gives the player's room entry the account's `OnlineID`: with any other
+  id BC does not treat the entry as the player, sees "another character" on the player's tile, and its collision handling shoves
+  the player to a random neighbouring tile every frame.
+- The map statistics overlay (frame timings, lighting counts, optionally the lighting geometry): Alt+Shift+L on the map in a
+  development build (`npm run watch`, or `localStorage.LSCG_DEV = "1"` on any build), `lscgPerf.hud("stats" | "debug" | "off")` in
+  the console, or the "Map statistics overlay (developer)" row on the Map Enhancements settings page (shown in development builds).
+- `test/bc-tier/map-source-fingerprint.bc.test.ts` hashes the BC map functions this work depends on. If BC changes one it fails,
+  and the message says how to refresh the hashes after reading the upstream change.
 
 ## What's not here yet
 

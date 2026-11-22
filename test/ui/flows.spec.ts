@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { expect, test, type Bc } from "./fixtures";
 
 test("Activities: clicking a zone on the character picks it, and settings for it save", async ({ bc }) => {
     await bc.openSettings("Activities");
@@ -202,7 +202,8 @@ test("Outfit Collection: the item panel sets, configures, colors and removes an 
         // Color: BC's color widget, closed with its own save
         $("item-color").click();
         await wait(() => !!ItemColorState && !!ItemColorItem);
-        await new Promise(r => setTimeout(r, 600)); // the opacity module adds its controls once the picker has loaded
+        // the opacity module adds its controls once the picker has loaded, which waits on BC's text files (slow on a cold cache)
+        await wait(() => !!document.querySelector("#lscg-layers-lead-lined-check"));
         out.layerControls = document.querySelectorAll("[id^=lscg-layers]").length > 0; // LSCG's opacity/translation apply to restraints too
         // ...but lead-lined is dropped by BC from every bundle, so it's hidden rather than left as a dead control
         out.leadLinedHidden = getComputedStyle(document.querySelector("#lscg-layers-lead-lined-check")!.closest("label")!).display === "none";
@@ -273,7 +274,7 @@ test("Outfit Collection: Build edits the outfit as it is, so a new one starts as
     await bc.openSettings("Outfit Collection");
     const result = await bc.run(async () => {
         const w = window as any;
-        const wait = async (cond: () => boolean) => { for (let i = 0; i < 120 && !cond(); i++) await new Promise(r => setTimeout(r, 100)); };
+        const wait = async (cond: () => boolean) => { for (let i = 0; i < 300 && !cond(); i++) await new Promise(r => setTimeout(r, 100)); };
         const $ = (id: string) => document.getElementById("lscg-outfit-edit-" + id) as any;
         const gui = () => w.LSCG.getModule("GUI").currentSubscreen;
         const out: any = {};
@@ -370,16 +371,18 @@ test("Outfit Collection: the creator's appearance screen still shows the charact
     await bc.openSettings("Outfit Collection");
     const skin = await bc.run(async () => {
         const w = window as any;
-        const wait = async (cond: () => boolean) => { for (let i = 0; i < 120 && !cond(); i++) await new Promise(r => setTimeout(r, 100)); };
+        const wait = async (cond: () => boolean) => { for (let i = 0; i < 300 && !cond(); i++) await new Promise(r => setTimeout(r, 100)); };
         w.LSCG.getModule("GUI").currentSubscreen.NewOutfit();
         await wait(() => !!document.getElementById("lscg-outfit-edit-build"));
         Object.assign(w.Player, { IsBlind: () => true, GetBlindLevel: () => 3, HasTints: () => true, GetTints: () => [{ r: 148, g: 0, b: 211, a: 0.6 }], GetBlurLevel: () => 4 });
         (document.getElementById("lscg-outfit-edit-build") as HTMLButtonElement).click();
         await wait(() => w.CurrentScreen === "Appearance");
+        // The character's torso. BC hides other characters from a blind viewer, and tints and blurs the rest. Its images load asynchronously, so
+        // look until the skin shows rather than after a fixed delay.
+        const read = () => { const px = (MainCanvas.canvas as HTMLCanvasElement).getContext("2d")!.getImageData(915, 375, 1, 1).data; return [px[0], px[1], px[2]]; };
         await new Promise(r => setTimeout(r, 2500));
-        // The character's torso. BC hides other characters from a blind viewer, and tints and blurs the rest.
-        const px = (MainCanvas.canvas as HTMLCanvasElement).getContext("2d")!.getImageData(915, 375, 1, 1).data;
-        return [px[0], px[1], px[2]];
+        await wait(() => read()[0] > 190);
+        return read();
     });
     // Light skin, not the dark dressing-room background that shows when the character isn't drawn
     expect(skin[0]).toBeGreaterThan(190);
@@ -433,10 +436,12 @@ test("Outfit Collection: colouring draws the character at centre, so dragging to
     await bc.openSettings("Outfit Collection");
     await bc.run(async () => {
         const w = window as any;
+        const wait = async (cond: () => boolean) => { for (let i = 0; i < 300 && !cond(); i++) await new Promise(r => setTimeout(r, 100)); };
         const $ = (id: string) => document.getElementById("lscg-outfit-edit-" + id) as any;
         w.LSCG.getModule("GUI").currentSubscreen.NewOutfit();
         await new Promise(r => setTimeout(r, 1200));
         $("item-group").value = "ItemMouth"; $("item-group").dispatchEvent(new Event("change"));
+        await wait(() => !![...$("item-cells").querySelectorAll(".lscg-item-cell")].find((c: any) => c.getAttribute("aria-label") === "Ball Gag"));
         [...$("item-cells").querySelectorAll(".lscg-item-cell")].find((c: any) => c.getAttribute("aria-label") === "Ball Gag").click();
         await new Promise(r => setTimeout(r, 500));
         $("item-color").click();
@@ -595,8 +600,9 @@ test("Outfit Collection: the lock button opens a lock modal where a lock is chos
         disabledWithoutItem: true,
         opens: { modal: true, itemGridClosed: true, title: "Mouth: Ball Gag" },
         noRemoveCellYet: true, noTimerLocks: true,
-        combination: { stillOpen: true, saved: ["CombinationPadlock", "0000"], field: "0000" },
-        badCombination: { invalid: true, kept: "0000" },
+        // R133 leaves a combination lock's default number (0000) out of the saved bundle and puts it back on load, so only the field shows it
+        combination: { stillOpen: true, saved: ["CombinationPadlock", undefined], field: "0000" },
+        badCombination: { invalid: true, kept: undefined },
         goodCombination: { saved: "1234", field: "1234", invalid: false },
         password: ["PasswordPadlock", "SECRET", "the usual", undefined],
         badPassword: { invalid: true, kept: "SECRET" },
@@ -614,14 +620,15 @@ test("Magic spell editor: effects are grouped by domain, stack up to their limit
     const result = await bc.run(async () => {
         const w = window as any;
         const wait = (ms = 150) => new Promise(r => setTimeout(r, ms));
-        const slots = () => [...document.querySelectorAll<HTMLSelectElement>(".lscg-spell-effect > .lscg-kit-row select, .lscg-spell-effects > .lscg-kit-row select")];
+        const slots = () => [...document.querySelectorAll<HTMLSelectElement>(".lscg-spell-effect-head select")];
         const choose = async (index: number, value: string) => {
             const select = slots()[index];
             select.value = value;
             select.dispatchEvent(new Event("change", { bubbles: true }));
             await wait();
         };
-        const summaries = () => [...document.querySelectorAll(".lscg-spell-effect .lscg-kit-expando-summary")].map(e => e.textContent);
+        // An effect's settings are behind a gear beside its dropdown, whose label summarises them; effects without settings have no gear.
+        const summaries = () => [...document.querySelectorAll(".lscg-spell-gear")].map(e => e.getAttribute("aria-label"));
 
 
         const out: any = {};
@@ -635,8 +642,10 @@ test("Magic spell editor: effects are grouped by domain, stack up to their limit
         out.slots = slots().length;
         out.summaries = summaries();
 
-        // The first copy's roll, and only that copy
-        const rollInput = () => document.querySelectorAll<HTMLInputElement>(".lscg-spell-effect input[type=text]")[0];
+        // The first copy's roll, and only that copy: its settings open in a dialog from its gear
+        document.querySelectorAll<HTMLButtonElement>(".lscg-spell-gear")[0].click();
+        await wait();
+        const rollInput = () => [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")].at(-1)!.querySelector<HTMLInputElement>("input[type=text]")!;
         rollInput().value = "4d10";
         rollInput().dispatchEvent(new Event("change", { bubbles: true }));
         await wait();
@@ -747,4 +756,63 @@ test("spell menu: Remove Curse offers what the target has on them, and casts wit
     expect(result.choices[2]).toBe("Web");
     expect(result.chosenAtFirst).toEqual(["- Random -"]);
     expect(result.cast).toEqual([[false, { 0: { target: "entry:w1" } }]]);
+});
+
+/** Opens BC's configuration screen for a new outfit's item in `group`, and returns a real-click helper. */
+async function configureItem(bc: Bc, group: string, label: string) {
+    await bc.openSettings("Outfit Collection");
+    await bc.run(async ([group, label]) => {
+        const w = window as any;
+        const $ = (id: string) => document.getElementById("lscg-outfit-edit-" + id) as any;
+        const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+        w.LSCG.getModule("GUI").currentSubscreen.NewOutfit();
+        await wait(1200);
+        $("item-group").value = group; $("item-group").dispatchEvent(new Event("change"));
+        [...$("item-cells").querySelectorAll(".lscg-item-cell")].find((c: any) => c.getAttribute("aria-label") === label).click();
+        await wait(800);
+        $("item-configure").click();
+        await wait(1200);
+    }, [group, label]);
+    return async (x: number, y: number) => {
+        const pt = await bc.run(([x, y]) => (window as any).Playground.toPage(x, y), [x, y]);
+        await bc.page.mouse.click(pt.x, pt.y);
+        await bc.page.waitForTimeout(500);
+    };
+}
+
+test("Outfit Collection: back from a modular item's module returns to its modules, and only then leaves", async ({ bc }) => {
+    const click = await configureItem(bc, "ItemHead", "Hypnotic Visor");
+    const where = () => bc.run(() => ({
+        focus: (window as any).DialogFocusItemName as string | null,
+        module: (0, eval)("ModularItemDataLookup")["ItemHeadHypnoticVisor"].currentModule as string,
+    }));
+    const text = await bc.run(() => (0, eval)("ModularItemDataLookup")["ItemHeadHypnoticVisor"].drawData.elementData[3].position);
+    await click(text[0] + 10, text[1] + 10); // the "Text" module
+    expect(await where()).toEqual({ focus: "ItemHeadHypnoticVisor", module: "Text" });
+    await click(1930, 70); // back
+    expect(await where()).toEqual({ focus: "ItemHeadHypnoticVisor", module: "Base" });
+    await click(text[0] + 10, text[1] + 10);
+    await bc.run(() => (window as any).LSCG.getModule("GUI").currentSubscreen.Exit()); // Escape / the exit door backs out the same way
+    expect(await where()).toEqual({ focus: "ItemHeadHypnoticVisor", module: "Base" });
+    await click(1930, 70);
+    expect((await where()).focus).toBeNull();
+});
+
+test("Outfit Collection: an option picked in the item's screen is still on the preview and in the outfit afterwards", async ({ bc }) => {
+    const click = await configureItem(bc, "ItemArms", "Leather Cuffs");
+    const wrist = await bc.run(() => (0, eval)("TypedItemDataLookup")["ItemArmsLeatherCuffs"].drawData.elementData[1].position);
+    await click(wrist[0] + 10, wrist[1] + 10);
+    await click(1930, 70);
+    const result = await bc.run(() => {
+        const w = window as any;
+        const code = (document.getElementById("lscg-outfit-edit-outfit-input") as any).value;
+        const bundle = JSON.parse(w.LZString.decompressFromBase64(code)).find((b: any) => b.Group === "ItemArms");
+        const preview = w.LSCG.getModule("GUI").currentSubscreen.preview;
+        return {
+            focus: w.DialogFocusItemName,
+            outfit: bundle?.Property?.TypeRecord,
+            preview: preview.Appearance.find((a: any) => a.Asset.Group.Name === "ItemArms")?.Property?.TypeRecord,
+        };
+    });
+    expect(result).toEqual({ focus: null, outfit: { typed: 1 }, preview: { typed: 1 } });
 });

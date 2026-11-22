@@ -27,6 +27,8 @@ export default defineConfig(({ mode: _ }) => {
     // Check if we are running the 'watch' script
 
     return {
+        // True for `npm run watch` / `npm run dev`; lets developer tools (see Utilities/dev.ts) show only in a local build.
+        define: { LSCG_DEV: JSON.stringify(false) },
         resolve: {
             alias: {
                 "Utilities": resolve(__dirname, "./src/Utilities"),

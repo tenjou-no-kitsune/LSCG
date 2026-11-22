@@ -1,3 +1,5 @@
+import { remoteAccessRows } from "./remoteAccessRows";
+import { BINAURAL_BEATS, SPIRAL_TURN_SECONDS, type BinauralPresetName } from "constants/game-balance";
 import { h } from "tsx-dom";
 import { getModule } from "modules";
 import { HypnoModule } from "Modules/hypno";
@@ -5,7 +7,18 @@ import { ICONS } from "utils";
 import { HypnoSettingsModel, InstructionDescription, LSCGHypnoInstruction } from "./Models/hypno";
 import { GuiSubscreen, HelpInfo } from "./settingBase";
 import { DomSettingsHost } from "./domSettingsHost";
-import { CheckboxRow, KitContext, Notice, NumberRow, RuleTable, SectionLabel, Tabs, TextRow } from "Dom/kit";
+import { extensionInstructionIds, extensionInstructions, instructionLabel } from "api/hypno";
+import { CheckboxRow, Chip, Icon, KitContext, Notice, NumberRow, RuleTable, SectionLabel, SelectRow, Tabs, TextRow } from "Dom/kit";
+
+/** An instruction's name in the block list: LSCG's own plain, an extension's marked the way the spell effects table marks one, with the
+ *  extension icon before the name and a chip naming the extension that added it. */
+export function instructionNameCell(instruction: string): HTMLElement {
+	const source = extensionInstructions.get(instruction)?.source;
+	return <div class="lscg-kit-chips">
+		<span>{source ? Icon("extension", "Added by an extension") : null}{instructionLabel(instruction)}</span>
+		{source ? Chip(source, { tone: "info", tooltip: "Added by an extension." }) : null}
+	</div> as HTMLElement;
+}
 
 /** Upper bound for the hypnosis timing inputs; the old screen had none. */
 export const HYPNO_TIME_MAX = 99999;
@@ -38,8 +51,9 @@ export class GuiHypno extends GuiSubscreen {
 		};
 	}
 
-	get ActualInstructions(): LSCGHypnoInstruction[] {
-		return Object.values(LSCGHypnoInstruction).filter(e => e != LSCGHypnoInstruction.none);
+	/** Every instruction a suggestion can hold: LSCG's own, then those installed extensions add. */
+	get ActualInstructions(): string[] {
+		return [...Object.values(LSCGHypnoInstruction).filter(e => e != LSCGHypnoInstruction.none), ...extensionInstructionIds()];
 	}
 
 	private build(): Node {
@@ -81,7 +95,7 @@ export class GuiHypno extends GuiSubscreen {
 						get: () => s.speakTriggers ?? "", set: v => s.speakTriggers = v, disabled: off,
 					}),
 					TextRow(ctx, {
-						label: "Whitelist member IDs", description: "Comma separated list of member IDs exclusive allowed to access your hypno settings and triggers. If empty will use standard Item Permissions.",
+						label: "Whitelist member IDs", description: "Comma separated list of member IDs exclusively allowed to use your triggers and suggestions. If empty will use standard Item Permissions. Remote access to these settings has its own tab.",
 						get: () => s.overrideMemberIds ?? "", set: v => s.overrideMemberIds = v, disabled: off,
 					}),
 					NumberRow(ctx, {
@@ -103,21 +117,14 @@ export class GuiHypno extends GuiSubscreen {
 				],
 			},
 			{
-				label: "Trance & remote",
+				label: "Remote Access",
 				render: () => [
-					SectionLabel("Remote access"),
+					SectionLabel("Remote access", "Let other players change your hypnosis settings through LSCG's remote settings."),
 					CheckboxRow(ctx, {
 						label: "Allow remote access", description: "If checked, allowed users can modify these settings.",
 						get: () => s.remoteAccess ?? false, set: v => s.remoteAccess = v, disabled: off,
 					}),
-					CheckboxRow(ctx, {
-						label: "Remote access requires trance", description: "If checked, remote access is only possible while actively hypnotized.",
-						get: () => s.remoteAccessRequiredTrance ?? true, set: v => s.remoteAccessRequiredTrance = v, disabled: noRemote,
-					}),
-					CheckboxRow(ctx, {
-						label: "Remote access limited to hypnotizer", description: "If checked, only the user who hypnotized you can access your settings (after matching other conditions).",
-						get: () => s.limitRemoteAccessToHypnotizer ?? true, set: v => s.limitRemoteAccessToHypnotizer = v, disabled: noRemote,
-					}),
+					...remoteAccessRows(ctx, s, { module: "HypnoModule", disabled: noRemote }),
 					CheckboxRow(ctx, {
 						label: "Allow remote override member modification", description: "If checked, any remote users can change your Override Member Id list (otherwise, only owner can).",
 						get: () => s.allowRemoteModificationOfMemberOverride ?? false, set: v => s.allowRemoteModificationOfMemberOverride = v, disabled: noRemote,
@@ -126,6 +133,11 @@ export class GuiHypno extends GuiSubscreen {
 						label: "Lockable", description: "If checked, allowed users can lock you out of these settings.",
 						get: () => s.allowLocked ?? false, set: v => s.allowLocked = v, disabled: noRemote,
 					}),
+				],
+			},
+			{
+				label: "Trance",
+				render: () => [
 					SectionLabel("While hypnotized"),
 					CheckboxRow(ctx, {
 						label: "Build arousal while hypnotized", description: "If checked being hypnotized will increase arousal.",
@@ -134,6 +146,31 @@ export class GuiHypno extends GuiSubscreen {
 					CheckboxRow(ctx, {
 						label: "Enable spirals", description: "If checked headsets and other spirals can cause trance.",
 						get: () => s.enableSpirals ?? true, set: v => s.enableSpirals = v, disabled: off,
+					}),
+					CheckboxRow(ctx, {
+						label: "Spiral overlay", description: "Draws a slowly turning purple spiral over the screen while you are hypnotized.",
+						get: () => s.enableSpiralOverlay ?? true, set: v => s.enableSpiralOverlay = v,
+					}),
+					NumberRow(ctx, {
+						label: "Spiral turn time (sec.)", description: "Seconds for the spiral overlay to make one full turn. Lower is faster.",
+						min: SPIRAL_TURN_SECONDS.MIN, max: SPIRAL_TURN_SECONDS.MAX, step: SPIRAL_TURN_SECONDS.STEP, get: () => s.spiralTurnSeconds ?? SPIRAL_TURN_SECONDS.DEFAULT, set: v => s.spiralTurnSeconds = v,
+						disabled: () => off() || s.enableSpiralOverlay === false,
+					}),
+					CheckboxRow(ctx, {
+						label: "Binaural beats", description: "Plays a soft binaural beat while you are hypnotized, fading in as the trance starts and fading out when you wake. Needs headphones. The evidence that beats affect the brain is mixed, so treat them as atmosphere. Not recommended if you have a history of seizures.",
+						get: () => s.enableBinaural ?? false, set: v => s.enableBinaural = v, disabled: off,
+					}),
+					SelectRow(ctx, {
+						label: "Beat pattern", description: "Alpha (about 10 Hz) is relaxed focus and theta (4 to 7 Hz) the deeper end. The glide starts in alpha and settles into theta.",
+						options: (Object.keys(BINAURAL_BEATS.PRESETS) as BinauralPresetName[]).map(value => ({ value, label: BINAURAL_BEATS.PRESETS[value].label })),
+						get: () => s.binauralPreset ?? BINAURAL_BEATS.DEFAULT_PRESET, set: v => s.binauralPreset = v,
+						disabled: () => off() || !s.enableBinaural,
+					}),
+					NumberRow(ctx, {
+						label: "Beat volume (%)", description: "How loud the beats get. Extensions can only play them at or below this.",
+						min: BINAURAL_BEATS.VOLUME_PERCENT.MIN, max: BINAURAL_BEATS.VOLUME_PERCENT.MAX, step: BINAURAL_BEATS.VOLUME_PERCENT.STEP, slider: true,
+						get: () => s.binauralVolume ?? BINAURAL_BEATS.VOLUME_PERCENT.DEFAULT, set: v => s.binauralVolume = v,
+						disabled: () => off() || !s.enableBinaural,
 					}),
 					CheckboxRow(ctx, {
 						label: "Enable wake-up on snaps", description: "If checked you exit the trance when you hear someone snapping.",
@@ -187,7 +224,7 @@ export class GuiHypno extends GuiSubscreen {
 						fixed: true,
 						rows: () => this.ActualInstructions,
 						columns: [
-							{ header: "Instruction", kind: "custom", width: "25%", render: i => <span>{i}</span> as HTMLElement, get: () => "", set: () => {} },
+							{ header: "Instruction", kind: "custom", width: "25%", render: i => instructionNameCell(i), get: () => "", set: () => {} },
 							{ header: "Description", kind: "custom", render: i => <small class="lscg-kit-desc">{InstructionDescription(i)}</small> as HTMLElement, get: () => "", set: () => {} },
 							{
 								header: "Block", kind: "checkbox", width: "4.5em", tooltip: "Suggestions can't give you this instruction.",

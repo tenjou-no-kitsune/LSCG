@@ -1,8 +1,10 @@
 import { getModule } from "modules";
+import { getCharacter } from "utils";
 import type { InjectorModule } from "Modules/injector";
-import { LSCGDoseOptions, LSCGDrugType, LSCGDrugContext, LSCGDrugThreshold, LSCGDrugDefinition, LSCGDrugDoseContext, LSCGDrugsApi } from "./types";
+import { LSCGDrugLevelInfo, LSCGDoseOptions, LSCGDrugType, LSCGDrugContext, LSCGDrugThreshold, LSCGDrugDefinition, LSCGDrugDoseContext, LSCGDrugsApi } from "./types";
 import { Registry } from "./registry";
 import { ErrorOwner, safeInvoke } from "./safeInvoke";
+import { validateOptionFields, type OptionField } from "./options";
 
 /** A drug an extension registered, with its callbacks already wrapped so errors stay contained. */
 export interface ExtensionDrug {
@@ -13,6 +15,10 @@ export interface ExtensionDrug {
     label: string;
     description: string;
     keywords: string[];
+    /** Words that read right before "-soaked" or "-laced" (see LSCGDrugDefinition.soakKeywords). Empty: the plain keywords. */
+    soakKeywords: string[];
+    /** Settings the player can change, drawn under the drug in Drug Enhancements. */
+    options: OptionField[];
     color: string;
     max: number;
     tickMs: number;
@@ -57,6 +63,25 @@ function positive(owner: ErrorOwner, what: string, value: unknown, fallback: num
     return value;
 }
 
+/** Doses the player; shared by `drugs.dose` and the gated `operations.drugs.dose`. */
+export function doseDrug(owner: ErrorOwner, type: LSCGDrugType, options: LSCGDoseOptions = {}): boolean {
+    if (typeof type !== "string" || type === "")
+        throw new Error(`LSCG[ext:${owner.id}]: dose needs a drug type.`);
+    const multiplier = positive(owner, "multiplier", options.multiplier, 1, true);
+    const injector = getModule<InjectorModule>("InjectorModule");
+    return !!injector?.DoseDrug(type, { ...options, multiplier });
+}
+
+/** Levels above 0 for the player (no `memberNumber`) or an estimate for someone else. */
+export function drugLevels(memberNumber?: number): LSCGDrugLevelInfo[] {
+    const injector = getModule<InjectorModule>("InjectorModule");
+    const mine = memberNumber === undefined || memberNumber === Player.MemberNumber;
+    const character = mine ? Player : getCharacter(memberNumber);
+    if (!injector || !character)
+        return [];
+    return injector.EstimatedBars(character as Character).map(bar => Object.freeze({ type: bar.type, level: bar.level, max: bar.max, estimated: !mine }));
+}
+
 /** Builds the `drugs` member of an extension handle. */
 export function createDrugsApi(owner: ErrorOwner & { readonly info: { name: string } }, scopedId: (name: string) => `${string}.${string}`, track: (disposer: () => void) => void): LSCGDrugsApi {
     const mine = new Map<string, () => void>();
@@ -71,6 +96,9 @@ export function createDrugsApi(owner: ErrorOwner & { readonly info: { name: stri
             if (!Array.isArray(def.keywords) || def.keywords.length === 0)
                 throw new Error(`LSCG[ext:${owner.id}]: drug "${def.name}" needs at least one keyword.`);
             const keywords = def.keywords.map((k, i) => requireText(owner, `drug "${def.name}" keyword ${i + 1}`, k));
+            if (def.soakKeywords !== undefined && !Array.isArray(def.soakKeywords))
+                throw new Error(`LSCG[ext:${owner.id}]: drug "${def.name}" soakKeywords must be a list of phrases.`);
+            const soakKeywords = (def.soakKeywords ?? []).map((k, i) => requireText(owner, `drug "${def.name}" soak keyword ${i + 1}`, k));
 
             const max = positive(owner, "max", def.max, DEFAULT_MAX, false);
             const thresholds = (def.thresholds ?? []).map((t, i) => {
@@ -86,6 +114,8 @@ export function createDrugsApi(owner: ErrorOwner & { readonly info: { name: stri
                 label: requireText(owner, `drug "${def.name}" label`, def.label),
                 description: typeof def.description === "string" ? def.description : "",
                 keywords,
+                soakKeywords,
+                options: validateOptionFields(owner, `drug "${def.name}"`, def.options),
                 color: typeof def.color === "string" && def.color.trim() !== "" ? def.color.trim() : DEFAULT_DRUG_COLOR,
                 max,
                 tickMs: Math.max(MIN_TICK_SECONDS, positive(owner, "tickSeconds", def.tickSeconds, DEFAULT_TICK_SECONDS, true)) * 1000,
@@ -106,17 +136,16 @@ export function createDrugsApi(owner: ErrorOwner & { readonly info: { name: stri
             return remove;
         },
 
-        dose(type: LSCGDrugType, options: LSCGDoseOptions = {}): boolean {
-            if (typeof type !== "string" || type === "")
-                throw new Error(`LSCG[ext:${owner.id}]: dose needs a drug type.`);
-            const multiplier = positive(owner, "multiplier", options.multiplier, 1, true);
+        dose: (type: LSCGDrugType, options: LSCGDoseOptions = {}) => doseDrug(owner, type, options),
+
+        getLevel(type: LSCGDrugType, memberNumber?: number): number {
             const injector = getModule<InjectorModule>("InjectorModule");
-            return !!injector?.DoseDrug(type, { ...options, multiplier });
+            if (memberNumber === undefined || memberNumber === Player.MemberNumber)
+                return injector?.GetDrugLevel(type) ?? 0;
+            return this.getLevels(memberNumber).find(bar => bar.type === type)?.level ?? 0;
         },
 
-        getLevel(type: LSCGDrugType): number {
-            return getModule<InjectorModule>("InjectorModule")?.GetDrugLevel(type) ?? 0;
-        },
+        getLevels: (memberNumber?: number) => drugLevels(memberNumber),
 
         unregister(name: string): boolean {
             const remove = mine.get(name);

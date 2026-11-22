@@ -1,3 +1,4 @@
+import type { BuiltInDrugDef } from "Modules/drugs/builtin";
 import { OutfitMigrator } from "Modules/Migrators/OutfitMigrator";
 import { SpeechAnalysisModule } from "Modules/speech-analysis";
 import { ActivityModule } from "Modules/activities";
@@ -6,6 +7,7 @@ import { ConsentModule } from "Modules/consent";
 import { HypnoModule } from "Modules/hypno";
 import { InjectorModule } from "Modules/injector";
 import { MagicModule } from "Modules/magic";
+import type { MiscModule } from "Modules/misc";
 import { OutfitCollectionModule } from "Modules/outfitCollection";
 import { ActivityEntryModel } from "Settings/Models/activities";
 import { OutfitCollection } from "Settings/OutfitCollection/outfitCollection";
@@ -46,7 +48,7 @@ export function DrugKeywords(): string[] {
 }
 
 export function NetgunKeywords(): string[] {
-	return getModule<InjectorModule>("InjectorModule")?.settings.netgunKeywords;
+	return getModule<MiscModule>("MiscModule")?.settings.netgunKeywords;
 }
 
 export function SedativeKeywords(): string[] {
@@ -59,6 +61,11 @@ export function HornyKeywords(): string[] {
 
 export function MindControlKeywords(): string[] {
 	return getModule<InjectorModule>("InjectorModule")?.settings.mindControlKeywords;
+}
+
+/** The keywords naming a built-in drug, from the injector's settings. */
+export function BuiltInDrugKeywords(drug: BuiltInDrugDef): string[] | undefined {
+	return getModule<InjectorModule>("InjectorModule")?.settings[drug.keywordsKey];
 }
 
 export function CureKeywords(): string[] {

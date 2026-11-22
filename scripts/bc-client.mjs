@@ -73,6 +73,7 @@ const NEEDED_FILES = [
 	"Screens/Inventory/ItemPelvis/FuturisticTrainingBelt/FuturisticTrainingBelt.js",
 	"Screens/Inventory/ItemDevices/KabeshiriWall/KabeshiriWall.js",
 	"Screens/Inventory/ItemDevices/FuckMachine/FuckMachine.js",
+	"Screens/Inventory/ItemDevices/CardBoardBox/CardBoardBox.js",
 	"Screens/Inventory/ItemBreast/ForbiddenChastityBra/ForbiddenChastityBra.js",
 	"Screens/Inventory/Suit/LatexCatsuit/LatexCatsuit.js",
 	"Screens/Inventory/ItemNeck/FuturisticCollar/FuturisticCollar.js",
@@ -102,12 +103,16 @@ const NEEDED_FILES = [
 	"Screens/Inventory/ItemNipples/LactationPump/LactationPump.js",
 	"Screens/Inventory/ItemNeckRestraints/CollarLeash/CollarLeash.js",
 	"Screens/Inventory/ItemDevices/Kennel/Kennel.js",
-	"Assets/Female3DCG/Female3DCG.js",
+	"Screens/Inventory/ItemDevices/BarStool/BarStool.js",
+	"Screens/Inventory/ItemDevices/GiantJar/GiantJar.js",
+	"Screens/Inventory/ItemHandheld/ToyHammer/ToyHammer.js",
+	"Assets/Female3DCG.js",
 	"Scripts/Drawing.js",
 	"Scripts/Server.js",
 	"Scripts/Item.js",
-	"Assets/Female3DCG/Female3DCGExtended.js",
+	"Assets/Female3DCGExtended.js",
 	"Screens/Room/Shop2/Shop2.js",
+	"Scripts/Notification.js",
 	"Scripts/Preference.js",
 	"Scripts/Translation.js",
 	"Scripts/Text.js",
@@ -137,6 +142,16 @@ const EXTRA_FILES = [
 
 export const ALL_FILES = [...NEEDED_FILES, ...EXTRA_FILES];
 
+/**
+ * Downloaded and cached like ALL_FILES but never evaluated: the "bc" tier only reads their text, to fingerprint BC code
+ * that LSCG's map performance work depends on or replaces (test/bc-tier/map-source-fingerprint.bc.test.ts). They are not
+ * in ALL_FILES because loading map/canvas code into jsdom would need far more stubbing than a text comparison deserves.
+ */
+export const FINGERPRINT_FILES = [
+	"Scripts/Map.js",
+	"Screens/Online/ChatRoom/ChatRoomMapView.js",
+];
+
 function readPin() {
 	return JSON.parse(readFileSync(PIN_FILE, "utf-8"));
 }
@@ -146,13 +161,32 @@ export function rawUrl(repo, sha, path) {
 	return `${base}/-/raw/${sha}/BondageClub/${path}`;
 }
 
+const FETCH_ATTEMPTS = 5;
+
+// gitgud.io intermittently returns 5xx/429, so retry those (and network
+// errors) with exponential backoff; other 4xx fail immediately.
 async function fetchText(url) {
-	const res = await fetch(url);
-	if (!res.ok) throw new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
-	return res.text();
+	let lastError;
+	for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+		try {
+			const res = await fetch(url);
+			if (res.ok) return await res.text();
+			lastError = new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
+			if (res.status < 500 && res.status !== 429) throw lastError;
+		} catch (err) {
+			if (err === lastError && !(/HTTP (5\d\d|429)/.test(err.message))) throw err;
+			lastError = err;
+		}
+		if (attempt < FETCH_ATTEMPTS) {
+			const delay = 1000 * 2 ** (attempt - 1);
+			console.warn(`bc-client: ${lastError.message}; retrying in ${delay}ms (${attempt}/${FETCH_ATTEMPTS})`);
+			await new Promise(r => setTimeout(r, delay));
+		}
+	}
+	throw lastError;
 }
 
-function cacheDirFor(gameVersion, sha) {
+export function cacheDirFor(gameVersion, sha) {
 	return join(ROOT, ".cache", `bc-${gameVersion}-${sha.slice(0, 7)}`);
 }
 
@@ -176,7 +210,7 @@ async function downloadInto(dir, repo, sha, gameVersionForGuard, { allowVersionM
 		else throw new Error(message);
 	}
 
-	for (const relPath of ALL_FILES) {
+	for (const relPath of [...ALL_FILES, ...FINGERPRINT_FILES]) {
 		const dest = join(dir, ...relPath.split("/"));
 		if (existsSync(dest)) continue;
 		const text = await fetchText(rawUrl(repo, sha, relPath));

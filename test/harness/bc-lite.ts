@@ -28,13 +28,13 @@ const HOOK_TARGETS = [
 	"DialogInventoryBuild", "CommandParse", "DrawArousalMeter", "ServerPlayerIsInChatRoom",
 	"DialogLoad", "DialogLeave", "DialogResize", "ActivityGenerateItemActivitiesFromNeed",
 	"StruggleMinigameStart", "StruggleMinigameStop", "DrawStatus", "DialogFacialExpressionsLoad",
-	"ChatRoomLeave", "ChatRoomCharacterViewDrawOverlay", "ChatRoomCharacterViewClickCharacter",
+	"ChatRoomLeave", "ChatRoomRun", "ChatRoomCharacterViewDrawOverlay", "ChatRoomCharacterViewClickCharacter",
 	"ChatRoomCanBeLeashedBy", "ChatRoomPingLeashedPlayers", "ChatRoomDoPingLeashedPlayers",
 	"ServerHandleLeashBeep", "ChatRoomBreakLeash", "ChatRoomMapViewLeash", "ChatRoomActivateView",
-	"RgbaArrayToHTMLColor", "DrawImageResize", "ChatRoomMapViewDrawGrid", "ChatRoomMapViewSyncMapData",
+	"RgbaArrayToHTMLColor", "DrawImageResize", "DrawImageEx", "ChatRoomMapViewDrawGrid", "ChatRoomMapViewSyncMapData",
 	"ChatRoomSyncRoomProperties", "ChatRoomMapViewUpdatePlayerFlag", "ChatRoomMapViewMouseWheel",
-	"ChatRoomMapViewUpdateFlag", "CharacterLoadCanvas", "ChatRoomMapViewClick", "DialogDraw",
-	"DialogClick", "AppearanceRun", "AppearanceClick", "InformationSheetRun", "InformationSheetClick", "InformationSheetExit",
+	"ChatRoomMapViewUpdateFlag", "CharacterLoadCanvas", "ChatRoomMapViewClick", "GameKeyDown", "DialogDraw",
+	"DialogClick", "AppearanceRun", "AppearanceClick", "InformationSheetLoad", "InformationSheetRun", "InformationSheetClick", "InformationSheetExit",
 	"ItemColorLoad", "ItemColorRevert", "ColorPickerExit", "CommonCallFunctionByNameWarn",
 	"CommonDrawAppearanceBuild", "CommonDrawApplyLayerAlphaMasks", "AssetLayerSort",
 	"CharacterAppearanceSortLayers", "ActivityOrgasmStart", "ChatRoomDrawArousalOverlay",
@@ -192,7 +192,11 @@ export function installBcLite(): BcLite {
 	// ---- Inventory / permission surface (real, simple implementations) --------
 	g.InventoryGet = (C: { Appearance?: { Asset: { Group: { Name: string } } }[] }, group: string) =>
 		C?.Appearance?.find(i => i.Asset.Group.Name === group) ?? null;
-	g.InventoryGetItemProperty = (C: unknown, group: string, prop: string) => g.InventoryGet(C, group)?.Property?.[prop];
+	// Same lookup order as BC's: the item's Property, then its Asset, then (if asked) its Group
+	g.InventoryGetItemProperty = (item: { Property?: Record<string, unknown>; Asset?: Record<string, unknown> & { Group?: Record<string, unknown> } } | null, prop: string, checkGroup = false) => {
+		if (!item?.Asset || !prop) return undefined;
+		return item.Property?.[prop] ?? item.Asset[prop] ?? (checkGroup ? item.Asset.Group?.[prop] : undefined);
+	};
 	g.InventoryGetLock = (item: { Property?: { LockedBy?: string } }) =>
 		item?.Property?.LockedBy ? { Name: item.Property.LockedBy } : null;
 	g.InventoryItemHasEffect = (item: { Property?: { Effect?: string[] } }, effect: string) =>

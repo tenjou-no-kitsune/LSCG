@@ -15,6 +15,19 @@ interface CraftingItem {
 // (BC validates/fills partial crafts at runtime). Overload so passing an item's Craft type-checks.
 declare function InventoryWear(C: Character, AssetName: AssetName, AssetGroup: AssetGroupName, ItemColor?: null | ItemColor, Difficulty?: null | number, MemberNumber?: null | number, Craft?: null | CraftingPartialItem, Refresh?: boolean): Item | null;
 
+declare let ChatRoomMapViewWidth: number;
+declare let ChatRoomMapViewHeight: number;
+/** BC R134 and later: width in canvas pixels of the area the map is drawn in. Not defined on R133, so test it with typeof. */
+declare let ChatRoomMapViewSplitPosition: number | undefined;
+/** True in a development build (see vite.config.ts); undefined where the build did not define it, e.g. some tests. */
+declare const LSCG_DEV: boolean | undefined;
+declare let MapManager: {
+	Map: {
+		getTileId(index: number): number | null;
+		getEffects(x: number, y: number): ChatRoomMapEffect[];
+	};
+};
+
 declare module "web-worker:*" {
     const WorkerFactory: new () => Worker;
     export default WorkerFactory;

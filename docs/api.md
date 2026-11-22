@@ -81,12 +81,15 @@ The choice is saved per browser, because the login screen comes before the playe
 
 `LSCG.getModApi({ id, name, version })` registers your extension and returns its handle.
 
-- **`id`** may only contain lowercase letters, digits, `_` and `-`. Registering an id that's already registered
-  throws.
+- **`id`** may only contain lowercase letters, digits, `_` and `-`. Calling `getModApi` again with an id that's already
+  registered gives you back the same handle (so a second script, or a callback that runs twice, can ask for it), and
+  the `name` and `version` of that second call are ignored. After `dispose()` the id is free to register afresh.
 - **`name`** and **`version`** are shown to players, in the login badge and in settings.
 - **Everything you register is namespaced** as `"<your id>.<name>"`. A spell effect named `bark` in extension
   `pets` becomes `pets.bark`, so it never clashes with other extensions.
 - **`api.dispose()`** removes everything you registered and frees your id.
+- **`api.sync()`** saves the player's LSCG settings and sends LSCG's public data to the room right away. See
+  [Storing data](#storing-data).
 
 ### Waiting for the player's settings
 
@@ -189,6 +192,7 @@ been applied. Its `ctx` has:
 | `duration` | How long the effect should last, in ms. `0` or `undefined` means no expiry. |
 | `sendAction(text)` | Sends an emote. `%NAME%`, `%POSSESSIVE%` and `%OPP_NAME%` (the caster) are filled in. |
 | `states` | LSCG's [built-in states](#built-in-states), to make the effect last |
+| `options` | The values the caster chose for this copy of your effect (see [Options players can change](#options-players-can-change)); `{}` if you declare none |
 
 **Making it last.** Extensions can't add their own states yet. To give an effect a duration, switch one of LSCG's
 built-in states for `ctx.duration`:
@@ -206,7 +210,38 @@ apply(ctx) {
 | `beneficial` | A spell made only of beneficial effects gets no save roll and no duration. |
 | `forcesDuration` | Always expires, even for players who allow unlimited-duration spells. |
 | `allowRandom` | Wild magic may pick it. |
+| `delay` | Milliseconds it waits after the spell's previous effect before taking hold (default 2000, from 1000 to 30000; anything lower is raised to 1000). The first effect of a spell always applies immediately. A spell's author can override it per effect in the spell editor. |
 | `defaultBlocked` | Blocked the first time a player sees it, until they unblock it. |
+| `options` | Settings the spell's author can change; see below. |
+
+**Settings the caster can change.** Declare `options` and LSCG shows them in the spell editor, stores them with each
+copy of the effect in the spell, and passes them to `apply` as `ctx.options`. In the editor your effect gets a gear
+button beside its dropdown, which opens the settings in a dialog of their own (the gear turns amber only for LSCG's own
+effects that still need something chosen). See [Options players can change](#options-players-can-change).
+
+```js
+api.spells.registerEffect({
+    name: "bark",
+    label: "Barking",
+    description: "Makes the target bark.",
+    options: [
+        { type: "toggle", key: "loud", label: "Loud", description: "Shouts instead of a yip." },
+        { type: "number", key: "times", label: "Barks", min: 1, max: 5, default: 2 },
+    ],
+    apply(ctx) {
+        const bark = ctx.options.loud ? "WOOF!" : "woof";
+        ctx.sendAction(`%NAME% barks: ${bark} `.repeat(ctx.options.times).trim());
+    },
+});
+```
+
+**Timing.** A spell's effects take hold one after another, each waiting after the one before it, between 1 and 30
+seconds. The wait is, in order of priority: the delay the spell's author set for that effect (in the spell editor, a
+thin "↳ wait 2s" line between two effects opens to change it), your effect's `delay`, then the spell-wide gap
+(2 seconds, which a `spell.beforeReceive` listener can change). `spell.received` tells listeners when each effect will
+land. If the target is dispelled or uses safeword while effects
+are still waiting, those effects are cancelled and never run `apply`; `spell.interrupted` tells listeners which ones. A dispel
+leaves the later effects of its own spell alone, so `[Dispel, Yours]` still applies yours.
 
 **Players without your extension.** Every client tells the room which effects it can apply. When a spell holds
 effects the target doesn't have, the caster's spell menu lists them as "(unsupported)". A spell whose effects are
@@ -243,7 +278,7 @@ api.activities.register({
         label: "Pat head",
         action: "SourceCharacter gently pats TargetCharacter's head.",
     }],
-    image: "Assets/Female3DCG/Activity/Slap.png",
+    image: "Icons/Activity/Slap.png",
     onSend: ({ target }) => { /* runs for the player doing it; return false to cancel */ },
     onReceive: ({ sender }) => { /* runs for the player it's done to */ },
 });
@@ -272,7 +307,12 @@ Add a drug that works like LSCG's own sedative, brainwashing drug and aphrodisia
 Latex Respirator, Filled Glass or Mug whose name or description contains one of your keywords is a dose of it, and
 the crafting screen offers it as a checkbox.
 
-**Players must opt in.** A drug does nothing to a player until they enable it in their Drug Enhancements
+Your keywords also work as gases and soaks without any extra wiring. A Latex Respirator or Cryo Capsule carrying one of your keywords
+doses the wearer a little at each breath, and so does any crafted gag, mask or other item in the mouth, nose or face slots whose name or
+description has a keyword followed by `-soaked` or `-laced` (e.g. `giggly-soaked`, `giggly-laced`). If your plain keywords are adjectives that read badly there ("intoxicating-laced"), give `soakKeywords` too (`["intoxicant"]` gives `intoxicant-laced`); the plain keywords still work. Soaks dry out after an hour unless the player has made them
+permanent. Both arrive as `method: "breath"` in `drug.beforeApply` and `drug.applied`, so the same veto and softening hooks apply.
+
+**Players must opt in.** A drug does nothing to a player until they enable it on the Extension drugs tab of their Drug Enhancements
 settings, which lists it with your extension's name and keywords.
 
 ```js
@@ -292,6 +332,11 @@ api.drugs.register({
 });
 ```
 
+Drugs from extensions are listed on their own **Extension drugs** tab of Drug Enhancements, which only appears when an
+installed extension adds one. Add `options` to a drug and each player can change its settings there, in a collapsed
+section below the opt-in table. Your callbacks read the player's values from `ctx.options`. See
+[Options players can change](#options-players-can-change).
+
 ### Levels
 
 Each drug has a level from 0 to `max`, which LSCG keeps and saves for you.
@@ -305,8 +350,8 @@ Each drug has a level from 0 to `max`, which LSCG keeps and saves for you.
 
 ### Callbacks
 
-Every callback gets a `ctx` with `drug`, `level`, `max`, `addLevel`, `setLevel`, `sendAction` and
-[`states`](#built-in-states).
+Every callback gets a `ctx` with `drug`, `level`, `max`, `addLevel`, `setLevel`, `sendAction`, the player's
+[`options`](#options-players-can-change) and [`states`](#built-in-states).
 
 | Callback | When it runs |
 |---|---|
@@ -378,8 +423,9 @@ api.drugs.dose("sedative", { multiplier: 0.5, minigame: false });   // a gentle 
   antidote clears every drug and ignores `multiplier`.
 - It returns `false` if nothing was applied.
 
-`api.drugs.getLevel(type)` reads any drug's current level. LSCG's own drugs use an internal scale. To work with them,
-listen to `drug.levelChanged`, which gives the level and the max on the same scale:
+`api.drugs.getLevel(type)` reads the player's current level of any drug, and `api.drugs.getLevels()` lists every level
+above 0 as `{ type, level, max, estimated }` (`level / max` is how full the bar is). LSCG's own drugs use an internal
+scale. To work with them, listen to `drug.levelChanged`, which gives the level and the max on the same scale:
 
 ```js
 api.events.on("drug.levelChanged", ({ type, previous, level, max }) => {
@@ -388,9 +434,146 @@ api.events.on("drug.levelChanged", ({ type, previous, level, max }) => {
 });
 ```
 
+**Other players' levels.** Pass a member number to either function to read someone else's:
+`api.drugs.getLevel("sedative", 1234)` or `api.drugs.getLevels(1234)`. For anyone but you these are estimates, flagged
+`estimated: true`. LSCG works them out the same way it draws the bars beside a character: take the levels their client
+last broadcast to the room, and decay them forward at the rates they broadcast, from when the packet arrived. It can't
+know about a dose or an antidote since their last broadcast until the next one comes. Any sync of theirs, whatever
+caused it, resets the estimate, because every public packet carries their current levels. (For your own player,
+`api.sync()` sends one on demand.) A player without LSCG, or not in
+your room, has no levels (`getLevel` gives `0` and `getLevels` an empty list), and a drug that wore off in the meantime
+reads `0`.
+
 You can only add drugs. LSCG's own can't be changed, but you can react to them, dose them, and veto them.
 
 ---
+
+## Hypnosis suggestions
+
+A hypnotist installs suggestions in a hypnotized player: a trigger phrase and up to three instructions, such as "Perform
+Activity" or "Strip", that the player carries out one after another when it is spoken (unless they resist). Add your own
+instruction and it appears in the suggestion editor next to LSCG's, under a "From extensions" heading.
+
+```js
+api.hypno.registerInstruction({
+    name: "purr",                       // the id becomes "<your id>.purr"
+    label: "Purr",
+    description: "Compel the subject to purr.",
+    options: [
+        { type: "select", key: "volume", label: "Volume", choices: [{ value: "softly", label: "Softly" }, { value: "loudly", label: "Loudly" }] },
+        { type: "toggle", key: "nuzzle", label: "Nuzzle the speaker" },
+    ],
+    perform(ctx) {
+        ctx.sendAction(`%NAME% purrs ${ctx.options.volume}.`);
+        if (ctx.options.nuzzle) ctx.sendAction("%NAME% nuzzles up against %OPP_NAME%.");
+    },
+});
+```
+
+**`perform`** runs on the hypnotized player's client when the suggestion fires and they submit to it. Its `ctx` has:
+
+| Field | |
+|---|---|
+| `instruction` | Your instruction's id |
+| `suggestion` | The suggestion's name |
+| `options` | The values chosen for this instruction, validated against your `options` (`{}` if you declare none) |
+| `sender` | Member number of whoever spoke the trigger |
+| `installedBy` | Member number of whoever installed the suggestion |
+| `sendAction(text)` | Sends an emote. `%NAME%`, `%POSSESSIVE%` and `%OPP_NAME%` (whoever spoke the trigger) are filled in. |
+| `states` | LSCG's [built-in states](#built-in-states) |
+
+**Options:**
+
+| Option | Effect |
+|---|---|
+| `options` | Settings whoever writes the suggestion can change, behind a "Configure…" button on the instruction. See [Options players can change](#options-players-can-change). |
+| `unrepeatable` | A suggestion can hold the instruction only once. |
+| `terminating` | Nothing can follow it in a suggestion. |
+
+- **Timing.** A suggestion's instructions happen one after another: the first at once, each later one waiting after the
+  one before it. By default that is 1 second. Whoever writes the suggestion can set their own wait, from 1 to 30 seconds,
+  for any instruction after the first, yours included (in the suggestion editor, a thin "↳ wait 1s" line above the
+  instruction opens to change it). You don't need to handle it. If the player uses safeword while instructions are
+  still waiting, those never run `perform`.
+- **Players stay in control.** Every instruction, yours included, is in the player's list of instructions they can block
+  on themselves, and a blocked one never runs `perform`. They can still resist the whole suggestion as usual.
+- **Watching and vetoing suggestions.** `hypno.suggestionResolved` tells you whether the player resisted or submitted. For each
+  instruction that then runs, `hypno.beforeInstruction` lets you skip it (a veto is silent, so don't use it to fake a result) and
+  `hypno.instructionPerformed` tells you it ran. These cover LSCG's own instructions as well as extensions'. An instruction the
+  player blocked never reaches either.
+- **Options are checked on the target's client.** A suggestion is written by another player, so before `perform` runs
+  its options are validated against your declaration, and when a suggestion is installed, anything that isn't one of your
+  declared options is dropped. Your callback never sees an out-of-range value.
+- **Without your extension.** A suggestion can hold your instruction on a player who doesn't have your extension. It shows
+  as "(unavailable)" in their editor, keeps none of its options, and does nothing but a note when the suggestion fires.
+- **`dispose()`** removes your instructions. Suggestions that hold them stay stored and work again once you're back.
+
+## Binaural beats
+
+Players can opt in to a binaural beat (a tone in each ear, a few hertz apart) that fades in when hypnosis starts and fades out
+over a second when they wake. It is their choice, in their hypnosis settings, and nothing here can make it play for a player who hasn't
+turned it on. The evidence that beats change anything in the brain is mixed, so treat them as atmosphere.
+
+Your extension can steer it through `api.operations.hypno.binaural`. Like everything under `operations`, it needs the player to
+allow your extension the `hypno` scope first (see `api.operations.request`).
+
+```js
+const beats = api.operations.hypno.binaural;
+
+beats.getState();       // { enabled, playing, hypnotized, beatHz, carrierHz, volume, maxVolume }
+beats.setVolume(0.5);   // half of the player's own volume setting (0 to 1); it can only go down, never above their setting
+beats.setBeat(4);       // glide to 4 Hz (1 to 30). Alpha is about 8 to 12 Hz, theta about 4 to 7
+beats.play();           // start now, hypnotized or not, fading in over 10 seconds. false if the player hasn't opted in or has their sound off
+beats.stop();           // fade out over a second, and stay off until this trance ends. Returns whether it was playing
+beats.play({ fadeSeconds: 30 });   // a slower fade in (0 to 60 seconds)
+beats.stop({ fadeSeconds: 0 });    // as close to instant as it gets without a click
+```
+
+Whatever you change lasts until the trance ends, then the player's own settings apply again. `hypno.binauralChanged` tells you
+when a beat starts or stops. Check the `hypno.binaural` capability first.
+
+---
+
+## Options players can change
+
+Spell effects, drugs and hypnosis instructions all take an `options` list. You describe each setting; LSCG draws the controls, saves the
+values, checks them and gives them to your callbacks as `ctx.options`. You never write UI code or handle storage.
+
+| `type` | Control | Extra fields | Value |
+|---|---|---|---|
+| `"toggle"` | Checkbox | `default` (false) | `boolean` |
+| `"number"` | Number box | `min` (0), `max` (`min` + 10), `step`, `default` (`min`) | `number` |
+| `"select"` | Dropdown | `choices: [{ value, label }]` (required), `default` (first) | `string` |
+| `"text"` | Text box | `maxLength` (200, at most 1000), `multiline`, `default` | `string` |
+
+Every field has a `key` (a plain identifier, unique in the list, and the name in `ctx.options`), an optional
+`label` (defaults to the key) and an optional `description`. A list holds up to 12 fields, and a select up to 24 choices.
+
+**Where players find them.** A spell effect's options are behind the gear beside the effect in the spell editor. A
+drug's options are on the Extension drugs tab of Drug Enhancements. A hypnosis instruction's options are behind the
+"Configure…" button on the instruction in the suggestion editor.
+
+```js
+options: [
+    { type: "toggle", key: "loud", label: "Loud", description: "The whole room hears it." },
+    { type: "number", key: "barks", label: "Barks", min: 1, max: 3, default: 1 },
+    { type: "select", key: "mood", label: "Mood", choices: [{ value: "happy", label: "Happy" }, { value: "startled", label: "Startled" }] },
+    { type: "text", key: "laugh", label: "Laugh", default: "hee hee", maxLength: 20 },
+],
+// ...and in apply / onDose / any drug callback:
+const { loud, barks, mood, laugh } = ctx.options;
+```
+
+- **Always valid.** `ctx.options` has every declared key with a legal value. Anything missing, out of range or of the
+  wrong type is replaced by its default, so you never need to check it.
+- **Spell effect options belong to the spell.** The spell's author sets them for each copy of your effect, and they
+  travel with the spell. The target's client checks them again against your declaration before `apply` runs, so a
+  tampered spell can't hand you an out-of-range value.
+- **Drug options belong to the wearer.** They are the player's own settings, shared by every dose.
+- **Instruction options belong to the suggestion.** Whoever writes the suggestion sets them for each instruction in it, and they
+  travel with it. The target's client checks them again against your declaration.
+- **Changing your declaration.** Saved values are matched by `key`. A renamed or removed key falls back to its default.
+- A malformed declaration throws when you register, naming the field.
 
 ## Built-in states
 
@@ -461,7 +644,11 @@ api.onReady(() => {                                    // storage needs the play
 | Kept | With the player's LSCG settings, so also in their exports | Only while your extension is loaded |
 
 - `get` returns a copy, so change it and then call `set`. `set(undefined)` clears it.
-- Storage throws until the player's settings are loaded, so use it from `api.onReady`.
+- `api.sync()` saves and syncs LSCG's public data to the room right away, for when you changed something outside
+  `setPublic` (which already syncs). Saves are batched to about one per second. It saves the player's whole LSCG
+  settings and sends LSCG's whole public packet (states, drug levels and every extension's public data), so call it
+  when something changed, not on a timer.
+- Storage and `sync` throw until the player's settings are loaded, so use them from `api.onReady`.
 - Data from other players came over the network, so check it before using it. Oversized data reads as
   `undefined`.
 
@@ -529,9 +716,14 @@ A `lscg:ready` event is also dispatched on `window` when LSCG becomes ready, wit
 | `events` | `api.events.on` / `once` / `before` |
 | `spells.effects` | `api.spells.registerEffect` / `unregisterEffect` / `listEffects` |
 | `activities` | `api.activities.register` / `unregister` / `registerPrerequisite` |
-| `drugs` | `api.drugs.register` / `unregister` / `dose` / `getLevel` |
+| `drugs` | `api.drugs.register` / `unregister` / `dose` / `getLevel` / `getLevels` |
+| `hypno.instructions` | `api.hypno.registerInstruction` / `unregisterInstruction` |
+| `hypno.binaural` | `api.operations.hypno.binaural` and the `hypno.binauralChanged` event |
+| `hypno.events` | The `hypno.suggestionResolved`, `hypno.instructionPerformed` and `hypno.beforeInstruction` events |
+| `drugs.strength` | `strength` on `drug.beforeApply` |
+| `drugs.suggestible` | The `suggestible` built-in drug type and the `drug.suggestionUrge` event |
 | `network` | `api.network.on` / `send` |
-| `storage` | `api.storage.get` / `set` / `getPublic` / `setPublic` |
+| `storage` | `api.storage.get` / `set` / `getPublic` / `setPublic`, `api.sync` |
 | `settings` | `api.settings.registerScreen` / `unregisterScreen` |
 
 ### Observe-only events
@@ -541,16 +733,21 @@ A `lscg:ready` event is also dispatched on `window` when LSCG becomes ready, wit
 | `ready` | `{}`: LSCG finished loading the player's settings. |
 | `state.activated` | `{ type, activatedBy?, duration? }`: a state such as `"asleep"`, `"hypnotized"` or `"blind"` began. |
 | `state.recovered` | `{ type, reason }`: a state ended. `reason` is `"expired"`, `"safeword"`, `"dispel"` or `"manual"`. |
-| `spell.cast` | `{ spell, target, paired? }`: the player cast a spell. |
+| `spell.cast` | `{ spell, target, paired? }`: the player cast a spell. Effects someone with remote access has locked on the player are already removed from `spell` (they fizzled), and the event does not fire if every effect was locked. |
 | `spell.resisted` | `{ spell, sender, bounced }`: the player saved against a spell. `bounced` means a barrier sent it back. |
-| `spell.received` | `{ spell, sender?, effects, duration? }`: a spell took hold. `effects` are the ones being applied. |
+| `spell.received` | `{ spell, sender?, effects, duration?, delays }`: a spell took hold. `effects` are the ones being applied, and `delays[i]` is how long (ms) after now `effects[i]` takes hold. |
+| `spell.interrupted` | `{ spell, sender?, reason, effects }`: effects that hadn't taken hold yet were cancelled. `reason` is `"dispel"`, `"safeword"` or `"unload"`, and `effects` are the ones that never applied. |
 | `spell.effectApplied` | `{ effect, spell, sender?, duration? }`: one effect was applied. |
 | `hypno.triggered` | `{ by?, byWord }`: the player was hypnotized by a trigger. `byWord` is false for other routes. |
 | `hypno.awakened` | `{ method, by? }`: brought out of hypnosis. `method` is `"word"`, `"boop"`, `"snap"`, `"timeout"` or `"other"`. |
+| `hypno.binauralChanged` | `{ playing, beatHz, volume }`: a binaural beat started or stopped. `volume` is the output gain (0 to 1) it is heading for. Both are 0 when it stops. |
+| `hypno.suggestionResolved` | `{ suggestion, sender, installedBy, resisted }`: a suggestion's trigger was spoken and the player resisted it (`resisted: true`) or submitted, so its instructions are about to run. |
+| `hypno.instructionPerformed` | `{ instruction, suggestion, index, sender, installedBy }`: one instruction of a suggestion ran, LSCG's own or an extension's. It ran, which isn't the same as succeeding (an Activity whose target has left still counts). Not fired for blocked or vetoed instructions, or for an extension instruction whose extension isn't installed. |
 | `activity.sent` | `{ name, group?, target?, isLSCG }`: the player did an activity. |
 | `activity.received` | `{ name, group?, source?, isLSCG }`: an activity was done to the player, including by themselves. |
 | `grab.added` / `grab.removed` | `{ type, pairedMember, isSource }`: a grab or leash started or ended. `isSource` means the player holds it. |
 | `drug.levelChanged` | `{ type, previous, level, max }`: any drug's level changed, including slow decay. `level / max` is how full the bar is. |
+| `drug.suggestionUrge` | `{ sender, phrase, level, max }`: someone asked a suggestible player to do something (`<name>, would you kindly <phrase>`) and the player felt the urge. They only get a prompt; nothing is forced. |
 | `drug.applied` | `{ types, method, sender?, location? }`: a dose took effect. `method` is `"drink"`, `"inject"` or `"breath"`. |
 | `collar.choke` | `{ level, previousLevel }`: the collar's choke level changed. |
 | `collar.passout` | `{ reason, by? }`: the player started passing out. `reason` is `"collar"`, `"hand"`, `"plugs"` or `"chain"`. |
@@ -564,10 +761,11 @@ A `spell` is `{ name, effects, creator? }`.
 
 | Event | You may change | If you cancel |
 |---|---|---|
-| `spell.beforeReceive` | `duration`, and remove entries from `effects` | The spell fizzles, with your reason in the emote |
+| `spell.beforeReceive` | `duration`, `delay` (ms between effects, default 2000, from 1000 to 30000), and remove entries from `effects` | The spell fizzles, with your reason in the emote |
 | `spell.beforeEffect` | `duration` | That one effect fails to take hold |
 | `grab.beforeIncoming` | Nothing | The grab is refused, and released on the grabber's side too |
-| `drug.beforeApply` | Remove entries from `types` | Nothing is applied |
+| `drug.beforeApply` | Remove entries from `types`, and lower `strength` (0 to 1, default 1; it scales the dose, so a drink at strength 0.5 adds half. Anything higher or not a number is ignored) | Nothing is applied |
+| `hypno.beforeInstruction` | Nothing. Payload as `hypno.instructionPerformed`. | That one instruction is skipped silently, and the rest of the suggestion carries on |
 
 These can't be intercepted: LSCG's settings saves, safewords, `/lscg` commands, and player-to-player commands.
 
@@ -581,6 +779,8 @@ These can't be intercepted: LSCG's settings saves, safewords, `/lscg` commands, 
 | Public storage | About 1 KB each, about 4 KB across all extensions |
 | Drug bars shown per player | 12 extension bars, after LSCG's own three |
 | Drug `tickSeconds` | At least 1 (default 6) |
+| `options` per effect, drug or instruction | 12 fields, 24 choices per select |
+| Wait between spell effects or suggestion instructions | 1 to 30 seconds |
 
 ### Types
 
@@ -609,7 +809,7 @@ in `build/types-package/`.
 
 ### Examples
 
-- [`examples/sample-extension.js`](../examples/sample-extension.js) uses every feature. Paste it into the console
-  or load it with a script tag, as its header explains.
+- [`examples/sample-extension.js`](../examples/sample-extension.js) uses every feature, including settings controls
+  on its spell effect and drug. Paste it into the console or load it with a script tag, as its header explains.
 - [`examples/lscgLoader-local.user.js`](../examples/lscgLoader-local.user.js) is for working on LSCG itself. It
   loads your local build and the example together.

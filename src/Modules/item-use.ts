@@ -25,6 +25,7 @@ export const MagicWandItems: string[] = [
 	"SmallVibratingWand",
 	"ShockWand",
 	"Baguette",
+	"AnimeGirlWand", // the Cosplay Girl Power Staff
 ];
 
 /** Handheld items the base game doesn't allow SipItem on, but we do. */
@@ -241,8 +242,8 @@ function makeButton(
 			const props = resolveStateChange(item, moduleKey, resolveTarget(currentIndex));
 			if (!props) return false;
 			SendAction(chatAction, C);
-			PropertyDifference(item.Property, props.previous);
-			PropertyUnion(item.Property, props.next);
+            ItemPropertiesDifference([props.previous], item.Asset, { output: item.Property });
+            ItemPropertiesUnion([props.next], item.Asset, { output: item.Property });
 			CharacterRefresh(C, false, false);
 			ChatRoomCharacterItemUpdate(C, item.Asset.Group.Name);
 			return true;
@@ -1342,7 +1343,6 @@ export class ItemUseModule extends BaseModule {
 					// Sends its own message; suppress the generic activity text (#812)
 					if (target)
 						this.GiveItem(target, Player);
-					return false;
 				},
 			},
 			CustomImage: "Icons/Dress.png",
@@ -1569,7 +1569,7 @@ export class ItemUseModule extends BaseModule {
 		// -5 if we're incapacitated, automatic failure if we're also defending
 		const incapacitatedMod = IsIncapacitated(C.IsPlayer() ? C as PlayerCharacter : C as OtherCharacter) ? (isAggressor ? 5 : 100) * -1 : 0;
 		// -2 for each level of choking
-		const breathMod = (C.IsPlayer() ? getModule<CollarModule>("CollarModule").totalChokeLevel : (C as OtherCharacter).LSCG?.CollarModule.chokeLevel ?? 0) * -2;
+		const breathMod = (C.IsPlayer() ? getModule<CollarModule>("CollarModule").totalChokeLevel : (C as OtherCharacter).LSCG?.CollarModule?.chokeLevel ?? 0) * -2;
 		// +/- 5 for buff state
 		const buffMod = (!buffState || !buffState.active) ? 0 : ((buffState.extensions["negative"] ?? false) ? -5 : 5);
 		// +5 magic barrier
@@ -1746,7 +1746,6 @@ export class ItemUseModule extends BaseModule {
 		const item = InventoryGet(source, "ItemHandheld");
 		if (!item)
 			return;
-		//SendAction(`${CharacterNickname(source)} gives %POSSESSIVE% ${this.getItemName(item)} to ${CharacterNickname(target)}.`);
 		InventoryRemove(source, "ItemHandheld", false);
 		const newItem = InventoryWear(target, item?.Asset.Name!, "ItemHandheld", item?.Color, item?.Difficulty, source.MemberNumber, item?.Craft, false);
 		if (newItem) newItem.Property = item.Property;
@@ -1847,10 +1846,10 @@ export class ItemUseModule extends BaseModule {
 				} else if (types.some((type) => InventoryBlockedOrLimited(targetOwner, targetItem, type ?? ""))) {
 					blocked = "blocked";
 				} else if (InventoryGroupIsBlocked(targetOwner, /** @type {AssetGroupItemName} */(targetItem.Asset.Group.Name) as AssetGroupItemName)) {
-					blocked = "unavail";
+					continue;
 				}
 			} else {
-				blocked = "unavail";
+				continue;
 			}
 
 			if (blocked) {
@@ -1962,10 +1961,11 @@ export class ItemUseModule extends BaseModule {
 		if (!!C && !!craft) {
 			let itemSrc = "";
 			let lockSrc = "";
-			for (const Item of C.Inventory) {
+			for (const Item of C.Inventory ?? []) {
 				if (Item.Asset.Name == craft.Item) {
 					itemSrc = "Assets/" + Player.AssetFamily + "/" + Item.Asset.DynamicGroupName + "/Preview/" + Item.Asset.Name + ".png";
-					if ((craft.Lock != null) && (craft.Lock != ""))
+					// Only a real lock: the name goes into the image's address, and comes from whoever shared the craft
+					if (typeof craft.Lock === "string" && craft.Lock != "" && AssetGet(Player.AssetFamily, "ItemMisc", craft.Lock))
 						lockSrc = "Assets/" + Player.AssetFamily + "/ItemMisc/Preview/" + craft.Lock + ".png";
 					break;
 				}
